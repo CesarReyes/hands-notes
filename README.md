@@ -11,7 +11,7 @@ La app es una PWA, el mismo modelo que GoodNotes usa para Android, Windows y Web
 - **iPad (Safari):** abre la URL, toca Compartir y luego **Agregar a pantalla de inicio**. Ábrela desde el ícono: corre a pantalla completa y funciona sin conexión.
 - **Android (Chrome):** abre la URL, toca el menú ⋮ y luego **Instalar app**.
 
-La primera vez, entra en **Cuenta** (ícono de persona) y crea tu cuenta con correo y contraseña. Te llega un código de 6 dígitos para confirmar. En los demás dispositivos entra con el mismo correo y contraseña.
+La primera vez, entra en **Cuenta** (ícono de persona) y crea tu cuenta con correo y contraseña. Te llega un correo con un enlace para confirmarla: ábrelo una vez (en cualquier navegador). Después, en cada tablet entra con el mismo correo y contraseña.
 
 ## Qué hace
 
@@ -81,13 +81,13 @@ supabase start -x studio,imgproxy,edge-runtime,logflare,vector,postgres-meta,sup
 npm run dev -- --mode localtest --port 5174
 ```
 
-Abre `http://localhost:5174` y `http://127.0.0.1:5174`. Son dos orígenes con almacenamiento separado, así que funcionan como dos dispositivos. Las migraciones están en `supabase/migrations/`, y la configuración de Auth (correo con código de 6 dígitos) en `supabase/config.toml` y `supabase/templates/`.
+Abre `http://localhost:5174` y `http://127.0.0.1:5174`. Son dos orígenes con almacenamiento separado, así que funcionan como dos dispositivos. Las migraciones están en `supabase/migrations/`, y la configuración de Auth en `supabase/config.toml`. La plantilla de correo con código de 6 dígitos (`supabase/templates/code.html`) solo se activa con plan de pago o SMTP propio.
 
 El despliegue es automático: cada push a `main` corre las pruebas, construye y publica en GitHub Pages (`.github/workflows/deploy.yml`).
 
 ## Límites conocidos
 
-- El correo de Supabase por defecto tiene un límite bajo de envíos por hora y solo entrega a miembros del equipo de la organización. Para más usuarios, configura un SMTP propio en Supabase.
+- El proyecto está en el plan gratuito de Supabase: el correo por defecto tiene un límite bajo de envíos por hora y no permite plantillas propias. Además, Supabase pausa los proyectos gratuitos tras 7 días sin actividad; se reactivan desde el panel.
 - Si dos dispositivos editan el **mismo** trazo sin conexión, gana la última edición. Los trazos nuevos nunca chocan.
 - Los PDF importados pueden pesar hasta 50 MB. Los PDF cifrados se ven bien en la app, pero al exportar su página original puede salir en blanco.
 - Pendiente para siguientes versiones: búsqueda en manuscrito y conversión a texto, imágenes, figuras reconocidas y colaboración compartida.

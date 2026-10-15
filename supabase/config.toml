@@ -243,14 +243,14 @@ otp_expiry = 3600
 # admin_email = "admin@email.com"
 # sender_name = "Admin"
 
-# Emails carry a 6-digit code: links would open Safari instead of the installed PWA on iPad.
-[auth.email.template.confirmation]
-subject = "Tu código de Hands Notes"
-content_path = "./supabase/templates/code.html"
-
-[auth.email.template.magic_link]
-subject = "Tu código de Hands Notes"
-content_path = "./supabase/templates/code.html"
+# Custom templates (a 6-digit code instead of a link, see templates/code.html) need a paid
+# plan or custom SMTP. On the free tier the default confirmation link is used instead.
+# [auth.email.template.confirmation]
+# subject = "Tu código de Hands Notes"
+# content_path = "./supabase/templates/code.html"
+# [auth.email.template.magic_link]
+# subject = "Tu código de Hands Notes"
+# content_path = "./supabase/templates/code.html"
 
 # [auth.email.template.invite]
 # subject = "You have been invited"

@@ -39,6 +39,6 @@ Evidencia REA: captura `capture_browser_scenario`; scripts exportados `export_we
 | Tres grosores y presets de color | Igual: tres grosores por herramienta y 5 presets editables |
 | Pluma, resaltador, borrador y lazo | Igual, más borrador parcial y línea recta al mantener el trazo |
 | CRDT (Yjs) e IndexedDB | IndexedDB más LWW por trazo. Los trazos son casi inmutables, así que el LWW por fila da la misma convergencia sin el costo de un CRDT por documento |
-| Login con código por correo | Correo y contraseña, más código de 6 dígitos (los enlaces abren Safari fuera de la PWA) |
+| Login con código por correo | Correo y contraseña; confirmación de la cuenta por enlace una sola vez (el código de 6 dígitos requiere SMTP propio en el plan gratuito) |
 
 Fuera de alcance en v1: texto tipado, imágenes, cinta, puntero láser, figuras, audio, IA, colaboración y búsqueda en manuscrito.

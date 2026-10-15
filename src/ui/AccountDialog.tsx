@@ -4,7 +4,7 @@ import { supabase, supabaseConfigured } from '../data/supabase'
 import { signOut, useAuth } from '../store/auth'
 import { Modal, Segmented } from './common'
 
-type Mode = 'signin' | 'signup' | 'code'
+type Mode = 'signin' | 'signup'
 
 export function AccountDialog({ onClose }: { onClose(): void }) {
   const session = useAuth((s) => s.session)
@@ -63,12 +63,14 @@ function SignedIn({ email, onClose }: { email: string; onClose(): void }) {
   )
 }
 
+/**
+ * Email + password. Signing up sends a one-time confirmation link (the free tier
+ * can't send custom code emails); after confirming, every device signs in with the password.
+ */
 function SignInForm({ onDone }: { onDone(): void }) {
   const [mode, setMode] = useState<Mode>('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [code, setCode] = useState('')
-  const [codeSent, setCodeSent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<{ kind: 'error' | 'info'; text: string } | null>(null)
 
@@ -81,26 +83,14 @@ function SignInForm({ onDone }: { onDone(): void }) {
         const { error } = await supabase.auth.signInWithPassword({ email, password })
         if (error) throw error
         onDone()
-      } else if (mode === 'signup') {
+      } else {
         const { data, error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } })
         if (error) throw error
         if (data.session) onDone()
         else {
-          setMode('code')
-          setCodeSent(true)
-          setMessage({ kind: 'info', text: 'Te enviamos un correo. Escribe aquí el código de 6 dígitos (o abre el enlace).' })
+          setMode('signin')
+          setMessage({ kind: 'info', text: 'Te enviamos un correo. Abre el enlace para confirmar tu cuenta y luego entra aquí con tu correo y contraseña.' })
         }
-      } else if (!codeSent) {
-        const { error } = await supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: true } })
-        if (error) throw error
-        setCodeSent(true)
-        setMessage({ kind: 'info', text: 'Revisa tu correo y escribe el código de 6 dígitos.' })
-      } else {
-        // A signup confirmation and a login code are both verified as an email OTP.
-        let { error } = await supabase.auth.verifyOtp({ email, token: code.trim(), type: 'email' })
-        if (error) ({ error } = await supabase.auth.verifyOtp({ email, token: code.trim(), type: 'signup' }))
-        if (error) throw error
-        onDone()
       }
     } catch (err) {
       setMessage({ kind: 'error', text: translateError(err instanceof Error ? err.message : String(err)) })
@@ -117,33 +107,23 @@ function SignInForm({ onDone }: { onDone(): void }) {
         onChange={(m) => {
           setMode(m)
           setMessage(null)
-          setCodeSent(false)
         }}
         options={[
           { value: 'signin', label: 'Entrar' },
           { value: 'signup', label: 'Crear cuenta' },
-          { value: 'code', label: 'Código por correo' },
         ]}
       />
       <label className="field">
         <span>Correo</span>
         <input type="email" autoComplete="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
       </label>
-      {mode !== 'code' && (
-        <label className="field">
-          <span>Contraseña</span>
-          <input type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} />
-        </label>
-      )}
-      {mode === 'code' && codeSent && (
-        <label className="field">
-          <span>Código</span>
-          <input inputMode="numeric" autoComplete="one-time-code" required pattern="[0-9]{6,10}" value={code} onChange={(e) => setCode(e.target.value)} />
-        </label>
-      )}
+      <label className="field">
+        <span>Contraseña</span>
+        <input type="password" autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} />
+      </label>
       {message && <p className={message.kind === 'error' ? 'error' : 'info'}>{message.text}</p>}
       <button className="btn primary" disabled={busy}>
-        {busy ? 'Un momento…' : mode === 'signin' ? 'Entrar' : mode === 'signup' ? 'Crear cuenta' : codeSent ? 'Verificar código' : 'Enviar código'}
+        {busy ? 'Un momento…' : mode === 'signin' ? 'Entrar' : 'Crear cuenta'}
       </button>
     </form>
   )
@@ -151,10 +131,9 @@ function SignInForm({ onDone }: { onDone(): void }) {
 
 function translateError(msg: string): string {
   if (/invalid login credentials/i.test(msg)) return 'Correo o contraseña incorrectos.'
-  if (/email not confirmed/i.test(msg)) return 'Confirma tu correo primero (usa la pestaña "Código por correo").'
+  if (/email not confirmed/i.test(msg)) return 'Confirma tu correo primero: abre el enlace que te enviamos al crear la cuenta.'
   if (/already registered/i.test(msg)) return 'Ese correo ya tiene cuenta. Usa "Entrar".'
   if (/rate limit/i.test(msg)) return 'Demasiados intentos. Espera un momento e inténtalo de nuevo.'
-  if (/expired|invalid.*otp|token/i.test(msg)) return 'El código no es válido o expiró.'
   if (/fetch|network/i.test(msg)) return 'Sin conexión. Inténtalo cuando tengas internet.'
   return msg
 }
