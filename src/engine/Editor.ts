@@ -143,8 +143,10 @@ export class Editor {
     }
     this.live.style.pointerEvents = 'none'
     this.bctx = this.base.getContext('2d', { alpha: false })!
-    // Low-latency ink layer: lets Chrome/Android present without waiting for the compositor.
-    this.lctx = (this.live.getContext('2d', { desynchronized: true }) ?? this.live.getContext('2d'))!
+    // No `desynchronized` here: on many Android GPUs Chrome promotes such a canvas to an
+    // overlay plane without alpha blending, so this transparent layer turns black and hides
+    // the pages. Latency comes from coalesced and predicted pointer events instead.
+    this.lctx = this.live.getContext('2d')!
 
     container.style.touchAction = 'none'
     container.addEventListener('pointerdown', this.onPointerDown)
