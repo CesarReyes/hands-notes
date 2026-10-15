@@ -1,0 +1,64 @@
+export type Tool = 'pen' | 'highlighter' | 'eraser' | 'lasso'
+export type InkTool = 'pen' | 'highlighter'
+export type PenStyle = 'fountain' | 'ballpoint' | 'brush'
+export type Template = 'blank' | 'lined' | 'grid' | 'dots' | 'cornell'
+export type Paper = 'white' | 'cream' | 'dark'
+
+/** Logical page size (A4 ratio). All stroke coordinates are in page units. */
+export const PAGE_WIDTH = 1000
+export const PAGE_HEIGHT = 1414
+
+export interface NotebookRow {
+  id: string
+  title: string
+  cover: string
+  created_at: number
+  updated_at: number
+  deleted: boolean
+  dirty: 0 | 1
+}
+
+export interface PageRow {
+  id: string
+  notebook_id: string
+  /** Fractional ordering key so inserts never renumber siblings. */
+  position: number
+  template: Template
+  paper: Paper
+  width: number
+  height: number
+  updated_at: number
+  deleted: boolean
+  dirty: 0 | 1
+}
+
+/**
+ * A stroke is immutable ink apart from moves/recolors. `points` is a flat
+ * [x, y, pressure, x, y, pressure, ...] array in page coordinates.
+ * `tool` encodes pen style for pens: 'pen:fountain' | 'pen:ballpoint' | 'pen:brush' | 'highlighter'.
+ */
+export interface StrokeRow {
+  id: string
+  notebook_id: string
+  page_id: string
+  tool: string
+  color: string
+  size: number
+  points: number[]
+  updated_at: number
+  deleted: boolean
+  dirty: 0 | 1
+}
+
+export interface Point {
+  x: number
+  y: number
+  p: number
+}
+
+export interface Rect {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
