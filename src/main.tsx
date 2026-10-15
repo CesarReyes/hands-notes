@@ -2,6 +2,8 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { registerSW } from 'virtual:pwa-register'
 import { App } from './App'
+import { loadFileBytes } from './data/files'
+import { setFileLoader } from './engine/pdfBackgrounds'
 import { initAuth } from './store/auth'
 import './styles.css'
 
@@ -14,6 +16,7 @@ media.addEventListener('change', applyTheme)
 // Ask the browser not to evict our IndexedDB under storage pressure.
 void navigator.storage?.persist?.()
 
+setFileLoader(loadFileBytes)
 registerSW({ immediate: true })
 initAuth()
 

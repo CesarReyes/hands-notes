@@ -165,13 +165,33 @@ export function drawPaper(ctx: CanvasRenderingContext2D, template: Template, pap
   }
 }
 
-/** Renders a whole page (paper + ink) into ctx, which must already be scaled to page units. */
+/** An imported page (e.g. PDF) under the ink; a placeholder until its bitmap is ready. */
+function drawBackground(ctx: CanvasRenderingContext2D, image: CanvasImageSource | null | undefined, w: number, h: number) {
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, w, h)
+  if (image) {
+    ctx.drawImage(image, 0, 0, w, h)
+    return
+  }
+  ctx.fillStyle = '#9aa1ad'
+  ctx.font = '28px system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillText('Cargando PDF…', w / 2, h / 2)
+  ctx.textAlign = 'start'
+}
+
+/**
+ * Renders a whole page (paper or background + ink) into ctx, which must already
+ * be scaled to page units. `background` is the bitmap for `page.background`, if any.
+ */
 export function drawPage(
   ctx: CanvasRenderingContext2D,
-  page: { template: Template; paper: Paper; width: number; height: number },
+  page: { template: Template; paper: Paper; width: number; height: number; background?: string | null },
   strokes: StrokeRow[],
+  background?: CanvasImageSource | null,
 ) {
-  drawPaper(ctx, page.template, page.paper, page.width, page.height)
+  if (page.background) drawBackground(ctx, background, page.width, page.height)
+  else drawPaper(ctx, page.template, page.paper, page.width, page.height)
   // Highlighter sits beneath pen ink, as on paper.
   for (const s of strokes) if (s.tool === 'highlighter') drawStroke(ctx, s, page.paper)
   for (const s of strokes) if (s.tool !== 'highlighter') drawStroke(ctx, s, page.paper)

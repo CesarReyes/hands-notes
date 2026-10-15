@@ -3,7 +3,9 @@ import { create } from 'zustand'
 import { db, getMeta, setMeta } from './db'
 import { observeTimestamp } from './clock'
 import { emitStrokes, localChanges } from './repo'
-import type { StrokeRow } from '../engine/types'
+import { parseBackground } from '../engine/background'
+import { fileAvailable } from '../engine/pdfBackgrounds'
+import type { FileRow, StrokeRow } from '../engine/types'
 import { supabase } from './supabase'
 import { fromWire, shouldApplyRemote, toWire, type LocalRow, type RemoteRow, type TableName } from './wire'
 
@@ -25,6 +27,7 @@ const PULL_OVERLAP_MS = 5000
 const PUSH_DEBOUNCE_MS = 600
 /** Keep RPC payloads well under request limits; strokes are the heavy rows. */
 const MAX_BATCH_BYTES = 512 * 1024
+const FILES_BUCKET = 'pdfs'
 
 function table(name: TableName) {
   return db.table<LocalRow, string>(name)
@@ -63,6 +66,7 @@ class SyncEngine {
   async refreshPending() {
     let pending = 0
     for (const t of TABLES) pending += await table(t).where('dirty').equals(1).count()
+    pending += await db.files.where('dirty').equals(1).count()
     useSyncStatus.setState({ pending })
     return pending
   }
@@ -94,6 +98,7 @@ class SyncEngine {
       await clearLocalData()
     } else if (!owner) {
       for (const t of TABLES) await table(t).toCollection().modify({ dirty: 1 })
+      await db.files.toCollection().modify({ dirty: 1 })
     }
     await setMeta('owner', uid)
   }
@@ -151,6 +156,8 @@ class SyncEngine {
     this.pushing = true
     this.setState('syncing')
     try {
+      // Files first, so a page never reaches another device before its PDF does.
+      await this.pushFiles()
       for (const t of TABLES) await this.pushTable(t)
       this.retryDelay = 2000
       const pending = await this.refreshPending()
@@ -165,6 +172,65 @@ class SyncEngine {
       if (this.pushAgain) {
         this.pushAgain = false
         void this.pushNow()
+      }
+    }
+  }
+
+  private filePath(fileId: string) {
+    return `${this.userId}/${fileId}.pdf`
+  }
+
+  private async pushFiles() {
+    const keys = await db.files.where('dirty').equals(1).primaryKeys()
+    for (const id of keys) {
+      const file = await db.files.get(id)
+      if (!file?.dirty) continue
+      const { error } = await supabase.storage
+        .from(FILES_BUCKET)
+        .upload(this.filePath(id), new Blob([file.data], { type: 'application/pdf' }), { contentType: 'application/pdf', upsert: false })
+      // Files are immutable, so "already exists" means an earlier upload landed.
+      if (error && !isDuplicate(error)) throw new Error(error.message)
+      await db.files.update(id, { dirty: 0 })
+    }
+  }
+
+  /** Fetches a file from Storage and keeps it locally for offline use. */
+  async downloadFile(fileId: string): Promise<ArrayBuffer> {
+    const existing = this.downloads.get(fileId)
+    if (existing) return existing
+    const p = (async () => {
+      if (!this.userId) throw new Error('Inicia sesión para descargar este PDF')
+      const { data, error } = await supabase.storage.from(FILES_BUCKET).download(this.filePath(fileId))
+      if (error || !data) throw new Error(error?.message ?? 'Download failed')
+      const bytes = await data.arrayBuffer()
+      const row: FileRow = { id: fileId, data: bytes, size: bytes.byteLength, dirty: 0 }
+      // Never overwrite a local copy that still has to be uploaded.
+      await db.transaction('rw', db.files, async () => {
+        if (!(await db.files.get(fileId))) await db.files.add(row)
+      })
+      fileAvailable(fileId)
+      return bytes
+    })().finally(() => this.downloads.delete(fileId))
+    this.downloads.set(fileId, p)
+    return p
+  }
+
+  private downloads = new Map<string, Promise<ArrayBuffer>>()
+
+  /** Downloads PDFs that live pages reference but this device lacks, so they open offline later. */
+  private async prefetchFiles() {
+    const ids = new Set<string>()
+    await db.pages.each((p) => {
+      const bg = !p.deleted && parseBackground(p.background)
+      if (bg) ids.add(bg.fileId)
+    })
+    const have = new Set(await db.files.toCollection().primaryKeys())
+    for (const id of ids) {
+      if (have.has(id) || !this.userId || !navigator.onLine) continue
+      try {
+        await this.downloadFile(id)
+      } catch (e) {
+        console.warn('PDF prefetch failed', id, e)
       }
     }
   }
@@ -216,6 +282,7 @@ class SyncEngine {
     // No 'syncing' state here: background pulls would make the badge flicker.
     try {
       for (const t of TABLES) await this.pullTable(t)
+      void this.prefetchFiles()
       const pending = await this.refreshPending()
       this.setState(pending ? 'syncing' : 'synced')
     } catch (e) {
@@ -263,9 +330,13 @@ class SyncEngine {
 }
 
 export async function clearLocalData() {
-  await db.transaction('rw', [db.notebooks, db.pages, db.strokes, db.meta], async () => {
-    await Promise.all([db.notebooks.clear(), db.pages.clear(), db.strokes.clear(), db.meta.clear()])
+  await db.transaction('rw', [db.notebooks, db.pages, db.strokes, db.meta, db.files], async () => {
+    await Promise.all([db.notebooks.clear(), db.pages.clear(), db.strokes.clear(), db.meta.clear(), db.files.clear()])
   })
+}
+
+function isDuplicate(error: { message: string; statusCode?: string | number }) {
+  return String(error.statusCode) === '409' || /already exists|duplicate/i.test(error.message)
 }
 
 export const sync = new SyncEngine()

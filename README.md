@@ -25,7 +25,8 @@ La primera vez, entra en **Cuenta** (ícono de persona) y crea tu cuenta con cor
 - **Papel:** rayado, cuadriculado, puntos, Cornell o en blanco, sobre fondo blanco, crema u oscuro. Se elige por página.
 - **Páginas:** añadir, duplicar, reordenar y eliminar, con panel de miniaturas.
 - **Biblioteca** con portadas, miniaturas y búsqueda.
-- **Exportar a PDF vectorial.**
+- **Importar PDF:** cada página del PDF se vuelve una página del cuaderno, con el PDF de fondo para escribir encima. El PDF se guarda en el dispositivo y en Supabase Storage, así que se abre sin conexión y en tus otras tablets.
+- **Exportar a PDF vectorial.** Las páginas importadas conservan el PDF original (texto y vectores) bajo la tinta.
 - **Sin conexión primero:** todo se guarda al instante en el dispositivo y se sincroniza al volver la red. Los cambios de otro dispositivo aparecen en vivo.
 
 ## Arquitectura
@@ -35,12 +36,14 @@ La primera vez, entra en **Cuenta** (ícono de persona) y crea tu cuenta con cor
 | UI | React 18 + TypeScript, Vite | Un solo código para iPad, Android y escritorio |
 | Motor de tinta | Canvas 2D propio + `perfect-freehand` | Contorno por presión. Una capa de tinta de baja latencia (`desynchronized`), eventos combinados y predichos del puntero, y caché de páginas en bitmap con dibujo vectorial directo al hacer zoom profundo |
 | Datos locales | IndexedDB (Dexie) | Escritura instantánea y uso completo sin conexión |
-| Sync | Supabase (Postgres + Realtime + Auth) | Filas por trazo, último en escribir gana (LWW) por `updated_at`, cursor `server_ts` y tiempo real filtrado por usuario |
+| Sync | Supabase (Postgres + Realtime + Auth + Storage) | Filas por trazo, último en escribir gana (LWW) por `updated_at`, cursor `server_ts` y tiempo real filtrado por usuario |
 | PWA | `vite-plugin-pwa` (Workbox) | Instalable y con caché offline del shell |
 
 ### Modelo de datos
 
 `notebooks` → `pages` (orden fraccional) → `strokes`. Los puntos de cada trazo viajan como `x, y, presión` cuantizados en Int16 y codificados en base64, unos 8 bytes por punto. Los IDs son UUIDv7, que se ordenan por tiempo, así el orden z de los trazos coincide en todos los dispositivos. Borrar es una nueva versión con `deleted = true`, así que deshacer y borrar se sincronizan igual que cualquier edición. RLS limita cada fila a su dueño, y las RPC `push_*` hacen upserts LWW en lote.
+
+Una página puede tener `background`, una referencia como `pdf:<id de archivo>:<página>`. Los PDF importados viven en la tabla local `files` (IndexedDB) y en el bucket privado `pdfs` de Storage, en `<user_id>/<id>.pdf`. Son inmutables: reimportar crea otro archivo. El envío sube los archivos pendientes antes que las páginas, y la descarga baja en segundo plano los PDF que faltan en el dispositivo. pdf.js (fondos) y pdf-lib (exportación) se cargan solo cuando hacen falta.
 
 ### Sincronización
 
@@ -71,7 +74,7 @@ npm run build
 Para probar la sincronización de punta a punta sin tocar producción, levanta Supabase local (requiere Docker) y usa el modo `localtest`, que apunta a `http://127.0.0.1:55321`:
 
 ```bash
-supabase start -x studio,imgproxy,edge-runtime,logflare,vector,storage-api,postgres-meta,supavisor,mailpit
+supabase start -x studio,imgproxy,edge-runtime,logflare,vector,postgres-meta,supavisor,mailpit
 ```
 
 ```bash
@@ -86,4 +89,5 @@ El despliegue es automático: cada push a `main` corre las pruebas, construye y 
 
 - El correo de Supabase por defecto tiene un límite bajo de envíos por hora y solo entrega a miembros del equipo de la organización. Para más usuarios, configura un SMTP propio en Supabase.
 - Si dos dispositivos editan el **mismo** trazo sin conexión, gana la última edición. Los trazos nuevos nunca chocan.
-- Pendiente para siguientes versiones: búsqueda en manuscrito y conversión a texto, imágenes, importar PDF para anotar, figuras reconocidas y colaboración compartida.
+- Los PDF importados pueden pesar hasta 50 MB. Los PDF cifrados se ven bien en la app, pero al exportar su página original puede salir en blanco.
+- Pendiente para siguientes versiones: búsqueda en manuscrito y conversión a texto, imágenes, figuras reconocidas y colaboración compartida.

@@ -1,13 +1,13 @@
 import { useLiveQuery } from 'dexie-react-hooks'
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { db } from '../data/db'
-import { COVER_COLORS, createNotebook, updateNotebook } from '../data/repo'
+import { COVER_COLORS, createNotebook, ImportError, importPdf, updateNotebook } from '../data/repo'
 import type { NotebookRow, Paper, Template } from '../engine/types'
 import { useAuth } from '../store/auth'
 import { useSettings } from '../store/settings'
 import { AccountDialog } from './AccountDialog'
 import { MenuItem, Modal, Popover, Segmented } from './common'
-import { IconMore, IconNotebook, IconPlus, IconSearch, IconTrash, IconUser } from './icons'
+import { IconImport, IconMore, IconNotebook, IconPlus, IconSearch, IconTrash, IconUser } from './icons'
 import { PageThumb } from './PageThumb'
 import { SyncBadge } from './SyncBadge'
 
@@ -26,6 +26,22 @@ export function Library({ onOpen }: { onOpen(id: string): void }) {
   const [creating, setCreating] = useState(false)
   const [account, setAccount] = useState(false)
   const session = useAuth((s) => s.session)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [importing, setImporting] = useState(false)
+
+  const onPickPdf = async (file: File | undefined) => {
+    if (!file) return
+    setImporting(true)
+    try {
+      const id = await importPdf(file, COVER_COLORS[Math.floor(Math.random() * COVER_COLORS.length)])
+      onOpen(id)
+    } catch (e) {
+      console.error(e)
+      window.alert(e instanceof ImportError ? e.message : `No se pudo importar “${file.name}”. ¿Es un PDF válido?`)
+    } finally {
+      setImporting(false)
+    }
+  }
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -64,6 +80,22 @@ export function Library({ onOpen }: { onOpen(id: string): void }) {
           </div>
           <span className="nb-title">Nuevo cuaderno</span>
         </button>
+        <button className="notebook-card new" onClick={() => fileInput.current?.click()} disabled={importing}>
+          <div className="cover new-cover">
+            <IconImport size={40} />
+          </div>
+          <span className="nb-title">{importing ? 'Importando…' : 'Importar PDF'}</span>
+        </button>
+        <input
+          ref={fileInput}
+          type="file"
+          accept="application/pdf,.pdf"
+          hidden
+          onChange={(e) => {
+            void onPickPdf(e.target.files?.[0])
+            e.target.value = ''
+          }}
+        />
         {visible.map((n) => (
           <NotebookCard key={n.id} notebook={n} onOpen={() => onOpen(n.id)} />
         ))}
@@ -187,7 +219,7 @@ function NewNotebookDialog({ onClose, onCreated }: { onClose(): void; onCreated(
     const id = await createNotebook(title.trim() || 'Sin título', cover, template, paper)
     onCreated(id)
   }
-  const preview = { id: 'preview', notebook_id: '', position: 0, template, paper, width: 1000, height: 1414, updated_at: 0, deleted: false, dirty: 0 as const }
+  const preview = { id: 'preview', notebook_id: '', position: 0, template, paper, width: 1000, height: 1414, background: null, updated_at: 0, deleted: false, dirty: 0 as const }
   return (
     <Modal
       title="Nuevo cuaderno"

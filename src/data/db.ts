@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { NotebookRow, PageRow, StrokeRow } from '../engine/types'
+import type { FileRow, NotebookRow, PageRow, StrokeRow } from '../engine/types'
 
 export interface MetaRow {
   key: string
@@ -11,6 +11,7 @@ export class NotesDB extends Dexie {
   pages!: EntityTable<PageRow, 'id'>
   strokes!: EntityTable<StrokeRow, 'id'>
   meta!: EntityTable<MetaRow, 'key'>
+  files!: EntityTable<FileRow, 'id'>
 
   constructor(name = 'hands-notes') {
     super(name)
@@ -20,6 +21,16 @@ export class NotesDB extends Dexie {
       strokes: 'id, page_id, notebook_id, dirty',
       meta: 'key',
     })
+    this.version(2)
+      .stores({ files: 'id, dirty' })
+      .upgrade((tx) =>
+        tx
+          .table('pages')
+          .toCollection()
+          .modify((p: PageRow) => {
+            p.background ??= null
+          }),
+      )
   }
 }
 

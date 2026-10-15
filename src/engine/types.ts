@@ -27,8 +27,20 @@ export interface PageRow {
   paper: Paper
   width: number
   height: number
+  /** What sits under the ink instead of ruled paper, e.g. an imported PDF page. See background.ts. */
+  background: string | null
   updated_at: number
   deleted: boolean
+  dirty: 0 | 1
+}
+
+/** An imported document, cached locally and mirrored to Supabase Storage. Its bytes never change. */
+export interface FileRow {
+  id: string
+  /** Raw bytes (ArrayBuffer rather than Blob: older iOS Safari mishandles Blobs in IndexedDB). */
+  data: ArrayBuffer
+  size: number
+  /** 1 until the bytes are in Storage. */
   dirty: 0 | 1
 }
 

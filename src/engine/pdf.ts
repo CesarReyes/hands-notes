@@ -1,21 +1,35 @@
 import type { jsPDF as JsPDF } from 'jspdf'
+import type { PDFDocument as PdfLibDocument } from 'pdf-lib'
+import { parseBackground, type PdfBackground } from './background'
 import { HIGHLIGHTER_ALPHA, inkColor, PAPER_COLORS, strokeOutline } from './render'
 import type { PageRow, StrokeRow } from './types'
 
 const A4_WIDTH_PT = 595.28
 
-/** Vector PDF export: ink stays sharp at any zoom, like GoodNotes' own export. */
-export async function exportNotebookPdf(title: string, pages: PageRow[], strokesByPage: Map<string, StrokeRow[]>) {
+/**
+ * Vector PDF export: ink stays sharp at any zoom, like GoodNotes' own export.
+ * Pages imported from a PDF get their original page embedded (still vector)
+ * under the ink; `loadFile` supplies that PDF's bytes.
+ */
+export async function exportNotebookPdf(
+  title: string,
+  pages: PageRow[],
+  strokesByPage: Map<string, StrokeRow[]>,
+  loadFile: (fileId: string) => Promise<ArrayBuffer>,
+) {
   const { jsPDF, GState } = await import('jspdf')
   const first = pages[0]
   const k = A4_WIDTH_PT / (first?.width ?? 1000)
-  const doc = new jsPDF({ unit: 'pt', format: [first.width * k, first.height * k], compress: true })
+  // jsPDF swaps [w, h] to match the orientation (portrait by default), so always pass it.
+  const orientation = (p: PageRow) => (p.width > p.height ? 'landscape' : 'portrait')
+  const doc = new jsPDF({ unit: 'pt', format: [first.width * k, first.height * k], orientation: orientation(first), compress: true })
   const translucent = new GState({ opacity: HIGHLIGHTER_ALPHA })
   const opaque = new GState({ opacity: 1 })
 
   pages.forEach((page, i) => {
-    if (i > 0) doc.addPage([page.width * k, page.height * k])
-    drawPaperPdf(doc, page, k)
+    if (i > 0) doc.addPage([page.width * k, page.height * k], orientation(page))
+    // Background pages stay transparent here; the original page goes underneath later.
+    if (!parseBackground(page.background)) drawPaperPdf(doc, page, k)
     const strokes = (strokesByPage.get(page.id) ?? []).slice().sort((a, b) => (a.id < b.id ? -1 : 1))
     const ordered = [...strokes.filter((s) => s.tool === 'highlighter'), ...strokes.filter((s) => s.tool !== 'highlighter')]
     for (const s of ordered) {
@@ -45,8 +59,71 @@ export async function exportNotebookPdf(title: string, pages: PageRow[], strokes
     doc.setGState(opaque)
   })
 
-  const safe = (title || 'Notas').replace(/[\\/:*?"<>|]+/g, '-').trim()
-  doc.save(`${safe}.pdf`)
+  const filename = `${(title || 'Notas').replace(/[\\/:*?"<>|]+/g, '-').trim()}.pdf`
+  const backgrounds = pages.map((p) => parseBackground(p.background))
+  if (!backgrounds.some(Boolean)) {
+    doc.save(filename)
+    return
+  }
+  const bytes = await underlayBackgrounds(doc.output('arraybuffer'), backgrounds, loadFile)
+  download(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }), filename)
+}
+
+/** Rebuilds the ink-only PDF with each imported page drawn beneath its ink. */
+async function underlayBackgrounds(
+  inkPdf: ArrayBuffer,
+  backgrounds: (PdfBackground | null)[],
+  loadFile: (fileId: string) => Promise<ArrayBuffer>,
+): Promise<Uint8Array> {
+  const { PDFDocument, degrees } = await import('pdf-lib')
+  const ink = await PDFDocument.load(inkPdf)
+  const out = await PDFDocument.create()
+  const sources = new Map<string, Promise<PdfLibDocument>>()
+  const source = (fileId: string) => {
+    let s = sources.get(fileId)
+    if (!s) {
+      s = loadFile(fileId).then((b) => PDFDocument.load(b, { ignoreEncryption: true }))
+      sources.set(fileId, s)
+    }
+    return s
+  }
+
+  for (let i = 0; i < backgrounds.length; i++) {
+    const bg = backgrounds[i]
+    if (!bg) {
+      const [copy] = await out.copyPages(ink, [i])
+      out.addPage(copy)
+      continue
+    }
+    const src = await source(bg.fileId)
+    const srcPage = src.getPage(Math.min(bg.page, src.getPageCount()) - 1)
+    const crop = srcPage.getCropBox()
+    const original = await out.embedPage(srcPage, { left: crop.x, bottom: crop.y, right: crop.x + crop.width, top: crop.y + crop.height })
+    const inkPage = await out.embedPage(ink.getPage(i))
+    const { width: W, height: H } = ink.getPage(i).getSize()
+    const page = out.addPage([W, H])
+    // Match pdf.js, which shows the page with its /Rotate applied (pdf-lib rotates counterclockwise).
+    const rot = ((srcPage.getRotation().angle % 360) + 360) % 360
+    const sideways = rot === 90 || rot === 270
+    // Fill the page exactly, as the canvas does (page heights are rounded to whole units).
+    const xScale = (sideways ? H : W) / crop.width
+    const yScale = (sideways ? W : H) / crop.height
+    const at = { 0: { x: 0, y: 0 }, 90: { x: 0, y: H }, 180: { x: W, y: H }, 270: { x: W, y: 0 } }[rot as 0 | 90 | 180 | 270] ?? { x: 0, y: 0 }
+    page.drawPage(original, { ...at, xScale, yScale, rotate: degrees(-rot) })
+    page.drawPage(inkPage, { x: 0, y: 0 })
+  }
+  return out.save()
+}
+
+function download(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
 }
 
 function drawPaperPdf(doc: JsPDF, page: PageRow, k: number) {

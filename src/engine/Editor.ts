@@ -11,6 +11,7 @@ import {
   unionRect,
 } from './geometry'
 import { History, type StrokeChange } from './history'
+import { backgroundEvents, backgroundImage } from './pdfBackgrounds'
 import { drawPage, drawStroke, HIGHLIGHTER_ALPHA, inkColor, outlineToPath, strokeOutline } from './render'
 import type { PageRow, PenStyle, Rect, StrokeRow, Tool } from './types'
 
@@ -157,6 +158,8 @@ export class Editor {
     container.addEventListener('touchmove', preventDefault, { passive: false })
     container.addEventListener('gesturestart', preventDefault as EventListener)
 
+    backgroundEvents.addEventListener('ready', this.onBackgroundReady)
+
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(container)
     this.resize()
@@ -167,6 +170,7 @@ export class Editor {
     cancelAnimationFrame(this.frame)
     if (this.momentum) cancelAnimationFrame(this.momentum)
     this.resizeObserver.disconnect()
+    backgroundEvents.removeEventListener('ready', this.onBackgroundReady)
     this.container.removeEventListener('pointerdown', this.onPointerDown)
     this.container.removeEventListener('pointermove', this.onPointerMove)
     this.container.removeEventListener('pointerup', this.onPointerUp)
@@ -196,7 +200,7 @@ export class Editor {
       const lp = { page, y }
       y += page.height + PAGE_GAP
       const old = prev.get(page.id)
-      if (old && (old.template !== page.template || old.paper !== page.paper)) this.invalidate(page.id)
+      if (old && (old.template !== page.template || old.paper !== page.paper || old.background !== page.background)) this.invalidate(page.id)
       return lp
     })
     this.docHeight = Math.max(0, y - PAGE_GAP)
@@ -974,6 +978,19 @@ export class Editor {
     if (c) c.valid = false
   }
 
+  /** A sharper (or first) background bitmap arrived; ref null means any background. */
+  private onBackgroundReady = (e: Event) => {
+    const ref = (e as CustomEvent<string | null>).detail
+    let hit = false
+    for (const { page } of this.pages) {
+      if (page.background && (ref === null || page.background === ref)) {
+        this.invalidate(page.id)
+        hit = true
+      }
+    }
+    if (hit) this.requestBase()
+  }
+
   private requestBase() {
     this.needsBase = true
     this.schedule()
@@ -1057,7 +1074,8 @@ export class Editor {
           maxY: (this.camY + this.height) / this.zoom - lp.y,
         }
         const strokes = (this.strokes.get(page.id) ?? []).filter((s) => !this.hidden.has(s.id) && rectsIntersect(view, pointsBounds(s.points, s.size)))
-        drawPage(ctx, page, strokes)
+        // The background itself stays a bitmap, capped at the cache resolution.
+        drawPage(ctx, page, strokes, backgroundImage(page.background, page.width * cacheScale))
         ctx.restore()
       }
     }
@@ -1080,7 +1098,7 @@ export class Editor {
     const ctx = entry.canvas.getContext('2d')!
     ctx.setTransform(scale, 0, 0, scale, 0, 0)
     const strokes = (this.strokes.get(page.id) ?? []).filter((s) => !this.hidden.has(s.id))
-    drawPage(ctx, page, strokes)
+    drawPage(ctx, page, strokes, backgroundImage(page.background, entry.canvas.width))
     entry.valid = true
     return entry
   }

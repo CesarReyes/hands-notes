@@ -131,6 +131,12 @@ export const IconDownload = (p: P) => (
     <path d="M5 20h14" />
   </Icon>
 )
+export const IconImport = (p: P) => (
+  <Icon {...p}>
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5M12 18v-6M9 15l3-3 3 3" />
+  </Icon>
+)
 export const IconX = (p: P) => (
   <Icon {...p}>
     <path d="M6 6l12 12M18 6L6 18" />

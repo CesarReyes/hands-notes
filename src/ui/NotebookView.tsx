@@ -4,6 +4,7 @@ import { db } from '../data/db'
 import { addPage, duplicatePage, liveStrokes, livePages, movePage, putStrokes, strokeEvents, touchNotebook, updateNotebook, updatePage, type StrokeEventDetail } from '../data/repo'
 import { Editor, type SelectionInfo } from '../engine/Editor'
 import { exportNotebookPdf } from '../engine/pdf'
+import { loadFileBytes } from '../data/files'
 import type { PageRow, Paper, PenStyle, StrokeRow, Template, Tool } from '../engine/types'
 import { editorSettingsOf, ERASER_SIZES, HIGHLIGHTER_SIZES, PEN_SIZES, useSettings } from '../store/settings'
 import { MenuItem, Popover, Segmented, Toggle } from './common'
@@ -158,7 +159,11 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
       if (!byPage.has(s.page_id)) byPage.set(s.page_id, [])
       byPage.get(s.page_id)!.push(s)
     }
-    await exportNotebookPdf(notebook?.title ?? 'Notas', pages, byPage)
+    try {
+      await exportNotebookPdf(notebook?.title ?? 'Notas', pages, byPage, loadFileBytes)
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'No se pudo exportar')
+    }
   }
 
   return (
@@ -259,6 +264,7 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
 
       {menu && (
         <Popover anchor={menu} onClose={() => setMenu(null)} align="end">
+          {!currentPage?.background && (
           <div className="menu-section">
             <span className="label">Papel de esta página</span>
             {currentPage && (
@@ -276,6 +282,7 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
               </>
             )}
           </div>
+          )}
           <MenuItem
             icon={<IconPlus size={18} />}
             onClick={() => {

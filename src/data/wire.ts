@@ -12,6 +12,8 @@ export function toWire(table: TableName, row: LocalRow): Record<string, unknown>
     const s = rest as Omit<StrokeRow, 'dirty'>
     return { ...s, points: encodePoints(s.points) }
   }
+  // Rows written before backgrounds existed have no field; send an explicit null.
+  if (table === 'pages') return { ...rest, background: (rest as Partial<PageRow>).background ?? null }
   return rest
 }
 
@@ -21,6 +23,7 @@ export function fromWire(table: TableName, remote: RemoteRow): LocalRow {
   const row = { ...rest, updated_at: Number(remote.updated_at), dirty: 0 } as Record<string, unknown>
   if (table === 'notebooks') row.created_at = Number(remote.created_at)
   if (table === 'strokes') row.points = decodePoints(remote.points as string)
+  if (table === 'pages') row.background = typeof remote.background === 'string' && remote.background ? remote.background : null
   return row as unknown as LocalRow
 }
 

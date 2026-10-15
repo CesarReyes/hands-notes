@@ -5,7 +5,8 @@ import { History } from '../engine/history'
 import { uuidv7 } from '../data/ids'
 import { nextTimestamp, observeTimestamp } from '../data/clock'
 import { fromWire, shouldApplyRemote, toWire } from '../data/wire'
-import type { StrokeRow } from '../engine/types'
+import { parseBackground, pdfBackground } from '../engine/background'
+import type { PageRow, StrokeRow } from '../engine/types'
 
 const line = (n: number, y = 0) => Array.from({ length: n }, (_, i) => [i * 10, y, 0.5]).flat()
 
@@ -98,6 +99,45 @@ describe('last-writer-wins merge', () => {
     back.points.forEach((v, i) => expect(v).toBeCloseTo(s.points[i], 4))
     // Re-encoding already-quantized points is lossless, so devices converge on identical ink.
     expect(decodePoints(encodePoints(back.points))).toEqual(back.points)
+  })
+})
+
+describe('page backgrounds on the wire', () => {
+  const fileId = uuidv7()
+  const page = (patch: Partial<PageRow> = {}): PageRow => ({
+    id: uuidv7(), notebook_id: 'nb', position: 1, template: 'blank', paper: 'white', width: 1000, height: 773,
+    background: pdfBackground(fileId, 3), updated_at: 42, deleted: false, dirty: 1, ...patch,
+  })
+
+  it('formats and parses PDF background refs', () => {
+    expect(parseBackground(pdfBackground(fileId, 3))).toEqual({ kind: 'pdf', fileId, page: 3 })
+    expect(parseBackground(null)).toBeNull()
+    expect(parseBackground('')).toBeNull()
+    expect(parseBackground(`pdf:${fileId}:0`)).toBeNull()
+    expect(parseBackground(`img:${fileId}:1`)).toBeNull()
+    expect(parseBackground('pdf:not-a-uuid:1')).toBeNull()
+  })
+  it('sends the background with the page', () => {
+    const p = page()
+    const wire = toWire('pages', p)
+    expect(wire).not.toHaveProperty('dirty')
+    expect(wire.background).toBe(p.background)
+    expect(wire.height).toBe(773)
+  })
+  it('sends an explicit null for pages stored before backgrounds existed', () => {
+    const legacy = page()
+    delete (legacy as Partial<PageRow>).background
+    expect(toWire('pages', legacy)).toHaveProperty('background', null)
+  })
+  it('round-trips the background from the server', () => {
+    const p = page()
+    const back = fromWire('pages', { ...toWire('pages', p), user_id: 'u', server_ts: 'x', updated_at: '42' as unknown as number } as never) as PageRow
+    expect(back).toEqual({ ...p, dirty: 0 })
+  })
+  it('treats a missing or empty server background as none', () => {
+    const { background: _b, ...noColumn } = toWire('pages', page())
+    expect((fromWire('pages', noColumn as never) as PageRow).background).toBeNull()
+    expect((fromWire('pages', { ...noColumn, background: '' } as never) as PageRow).background).toBeNull()
   })
 })
 
