@@ -214,10 +214,19 @@ function NewNotebookDialog({ onClose, onCreated }: { onClose(): void; onCreated(
   const [cover, setCover] = useState(COVER_COLORS[Math.floor(Math.random() * COVER_COLORS.length)])
   const [template, setTemplate] = useState<Template>(settings.defaultTemplate)
   const [paper, setPaper] = useState<Paper>(settings.defaultPaper)
-  const create = async () => {
-    settings.set({ defaultTemplate: template, defaultPaper: paper })
-    const id = await createNotebook(title.trim() || 'Sin título', cover, template, paper)
+  const submitted = useRef(false)
+  const create = () => {
+    // Taps that arrive before the dialog unmounts must not create duplicates.
+    if (submitted.current) return
+    submitted.current = true
+    const { id, saved } = createNotebook(title.trim() || 'Sin título', cover, template, paper)
+    saved.catch((e) => {
+      console.error(e)
+      window.alert('No se pudo crear el cuaderno. Inténtalo de nuevo.')
+      location.hash = '#/'
+    })
     onCreated(id)
+    settings.set({ defaultTemplate: template, defaultPaper: paper })
   }
   const preview = { id: 'preview', notebook_id: '', position: 0, template, paper, width: 1000, height: 1414, background: null, updated_at: 0, deleted: false, dirty: 0 as const }
   return (
@@ -225,7 +234,7 @@ function NewNotebookDialog({ onClose, onCreated }: { onClose(): void; onCreated(
       title="Nuevo cuaderno"
       onClose={onClose}
       footer={
-        <button className="btn primary" onClick={() => void create()}>
+        <button className="btn primary" onClick={create}>
           Crear
         </button>
       }
@@ -234,7 +243,7 @@ function NewNotebookDialog({ onClose, onCreated }: { onClose(): void; onCreated(
         <div className="stack">
           <label className="field">
             <span>Título</span>
-            <input autoFocus placeholder="Sin título" value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void create()} />
+            <input autoFocus placeholder="Sin título" value={title} onChange={(e) => setTitle(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && create()} />
           </label>
           <span className="label">Portada</span>
           <CoverPicker value={cover} onChange={setCover} />

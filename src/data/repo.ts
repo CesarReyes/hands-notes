@@ -14,16 +14,21 @@ function changed() {
 
 export const COVER_COLORS = ['#3b5bdb', '#2b8a3e', '#c2255c', '#e8590c', '#5f3dc4', '#0b7285', '#495057', '#d9480f']
 
-export async function createNotebook(title: string, cover: string, template: Template, paper: Paper): Promise<string> {
+/**
+ * Returns the new id synchronously so the UI can open the notebook right away;
+ * `saved` settles once it is in IndexedDB (the editor fills in when it lands).
+ */
+export function createNotebook(title: string, cover: string, template: Template, paper: Paper): { id: string; saved: Promise<void> } {
   const now = nextTimestamp()
   const notebook: NotebookRow = { id: uuidv7(), title, cover, created_at: now, updated_at: now, deleted: false, dirty: 1 }
   const page = newPage(notebook.id, 1, template, paper)
-  await db.transaction('rw', db.notebooks, db.pages, async () => {
-    await db.notebooks.add(notebook)
-    await db.pages.add(page)
-  })
-  changed()
-  return notebook.id
+  const saved = db
+    .transaction('rw', db.notebooks, db.pages, async () => {
+      await db.notebooks.add(notebook)
+      await db.pages.add(page)
+    })
+    .then(changed)
+  return { id: notebook.id, saved }
 }
 
 function newPage(notebookId: string, position: number, template: Template, paper: Paper, background: string | null = null, height = PAGE_HEIGHT): PageRow {
