@@ -809,3 +809,13 @@ input {
     justify-content: safe center;
   }
 }
+
+.login {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.login-card {
+  width: min(380px, 100%);
+}

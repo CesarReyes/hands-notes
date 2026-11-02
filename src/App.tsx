@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Library } from './ui/Library'
 import { NotebookView } from './ui/NotebookView'
+import { LoginScreen } from './ui/LoginScreen'
+import { supabaseConfigured } from './data/supabase'
+import { useAuth } from './store/auth'
 
 /** Hash routing keeps deep links working on static hosting (GitHub Pages). */
 function parseRoute(): { notebookId: string | null } {
@@ -10,6 +13,7 @@ function parseRoute(): { notebookId: string | null } {
 
 export function App() {
   const [route, setRoute] = useState(parseRoute)
+  const { session, ready } = useAuth()
 
   useEffect(() => {
     const onHash = () => setRoute(parseRoute())
@@ -23,6 +27,11 @@ export function App() {
   const back = useCallback(() => {
     location.hash = '#/'
   }, [])
+
+  if (supabaseConfigured) {
+    if (!ready) return null
+    if (!session) return <LoginScreen />
+  }
 
   return route.notebookId ? <NotebookView key={route.notebookId} notebookId={route.notebookId} onBack={back} /> : <Library onOpen={open} />
 }
