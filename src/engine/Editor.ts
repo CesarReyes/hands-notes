@@ -156,8 +156,8 @@ export class Editor {
     container.addEventListener('wheel', this.onWheel, { passive: false })
     container.addEventListener('contextmenu', (e) => e.preventDefault())
     // iOS Safari still fires legacy touch gestures; block them so the page never zooms or scrolls.
-    container.addEventListener('touchstart', preventDefault, { passive: false })
-    container.addEventListener('touchmove', preventDefault, { passive: false })
+    container.addEventListener('touchstart', preventCanvasDefault, { passive: false })
+    container.addEventListener('touchmove', preventCanvasDefault, { passive: false })
     container.addEventListener('gesturestart', preventDefault as EventListener)
 
     backgroundEvents.addEventListener('ready', this.onBackgroundReady)
@@ -178,8 +178,8 @@ export class Editor {
     this.container.removeEventListener('pointerup', this.onPointerUp)
     this.container.removeEventListener('pointercancel', this.onPointerCancel)
     this.container.removeEventListener('wheel', this.onWheel)
-    this.container.removeEventListener('touchstart', preventDefault)
-    this.container.removeEventListener('touchmove', preventDefault)
+    this.container.removeEventListener('touchstart', preventCanvasDefault)
+    this.container.removeEventListener('touchmove', preventCanvasDefault)
     this.base.remove()
     this.live.remove()
     this.cache.clear()
@@ -531,7 +531,7 @@ export class Editor {
   }
 
   private onPointerDown = (e: PointerEvent) => {
-    if (this.disposed) return
+    if (this.disposed || !onCanvas(e)) return
     e.preventDefault()
     this.stopMomentum()
     const p = this.local(e)
@@ -1207,6 +1207,15 @@ export class Editor {
 
 function preventDefault(e: Event) {
   e.preventDefault()
+}
+
+/** UI overlaid on the canvas (page chips, selection menu) shares the container and must keep its taps. */
+function onCanvas(e: Event) {
+  return e.target instanceof HTMLCanvasElement
+}
+
+function preventCanvasDefault(e: Event) {
+  if (onCanvas(e)) e.preventDefault()
 }
 
 function byId(a: StrokeRow, b: StrokeRow) {
