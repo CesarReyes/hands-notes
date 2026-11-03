@@ -6,6 +6,7 @@ import { uuidv7 } from '../data/ids'
 import { nextTimestamp, observeTimestamp } from '../data/clock'
 import { fromWire, shouldApplyRemote, toWire } from '../data/wire'
 import { parseBackground, pdfBackground } from '../engine/background'
+import { imageFileId, imagePoints, imageRect, imageTool, isImage } from '../engine/images'
 import type { PageRow, StrokeRow } from '../engine/types'
 
 const line = (n: number, y = 0) => Array.from({ length: n }, (_, i) => [i * 10, y, 0.5]).flat()
@@ -138,6 +139,28 @@ describe('page backgrounds on the wire', () => {
     const { background: _b, ...noColumn } = toWire('pages', page())
     expect((fromWire('pages', noColumn as never) as PageRow).background).toBeNull()
     expect((fromWire('pages', { ...noColumn, background: '' } as never) as PageRow).background).toBeNull()
+  })
+})
+
+describe('placed images', () => {
+  const fileId = '01a13f26-59f7-7305-a8cf-c24344b71e79'
+  const img = stroke('img', { tool: imageTool(fileId), color: '', size: 0, points: imagePoints({ minX: 100, minY: 200.5, maxX: 640.25, maxY: 900 }) })
+
+  it('is told apart from ink by its tool', () => {
+    expect(isImage(img)).toBe(true)
+    expect(imageFileId(img)).toBe(fileId)
+    expect(isImage(stroke('ink'))).toBe(false)
+    expect(imageFileId(stroke('ink'))).toBeNull()
+  })
+
+  it('keeps its rectangle through the wire format', () => {
+    const back = fromWire('strokes', toWire('strokes', img) as never) as StrokeRow
+    expect(back.tool).toBe(imageTool(fileId))
+    expect(imageRect(back)).toEqual({ minX: 100, minY: 200.5, maxX: 640.25, maxY: 900 })
+  })
+
+  it('moves like ink', () => {
+    expect(imageRect({ points: translatePoints(img.points, 10, -20) })).toEqual({ minX: 110, minY: 180.5, maxX: 650.25, maxY: 880 })
   })
 })
 

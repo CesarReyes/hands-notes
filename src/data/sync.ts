@@ -5,6 +5,7 @@ import { observeTimestamp } from './clock'
 import { emitStrokes, localChanges } from './repo'
 import { parseBackground } from '../engine/background'
 import { fileAvailable } from '../engine/pdfBackgrounds'
+import { imageFileId } from '../engine/images'
 import type { FileRow, StrokeRow } from '../engine/types'
 import { supabase } from './supabase'
 import { fromWire, shouldApplyRemote, toWire, type LocalRow, type RemoteRow, type TableName } from './wire'
@@ -27,7 +28,14 @@ const PULL_OVERLAP_MS = 5000
 const PUSH_DEBOUNCE_MS = 600
 /** Keep RPC payloads well under request limits; strokes are the heavy rows. */
 const MAX_BATCH_BYTES = 512 * 1024
-const FILES_BUCKET = 'pdfs'
+const PDF_BUCKET = 'pdfs'
+const IMAGE_BUCKET = 'images'
+
+/** Storage bucket and object name for a file: PDFs and images live apart, with their own type limits. */
+function storageLocation(userId: string, fileId: string, type = 'application/pdf') {
+  if (type === 'application/pdf') return { bucket: PDF_BUCKET, path: `${userId}/${fileId}.pdf` }
+  return { bucket: IMAGE_BUCKET, path: `${userId}/${fileId}.${type === 'image/png' ? 'png' : 'jpg'}` }
+}
 
 function table(name: TableName) {
   return db.table<LocalRow, string>(name)
@@ -156,7 +164,7 @@ class SyncEngine {
     this.pushing = true
     this.setState('syncing')
     try {
-      // Files first, so a page never reaches another device before its PDF does.
+      // Files first, so a page never reaches another device before its PDF or images do.
       await this.pushFiles()
       for (const t of TABLES) await this.pushTable(t)
       this.retryDelay = 2000
@@ -176,18 +184,16 @@ class SyncEngine {
     }
   }
 
-  private filePath(fileId: string) {
-    return `${this.userId}/${fileId}.pdf`
-  }
-
   private async pushFiles() {
     const keys = await db.files.where('dirty').equals(1).primaryKeys()
     for (const id of keys) {
       const file = await db.files.get(id)
       if (!file?.dirty) continue
+      const type = file.type ?? 'application/pdf'
+      const { bucket, path } = storageLocation(this.userId!, id, type)
       const { error } = await supabase.storage
-        .from(FILES_BUCKET)
-        .upload(this.filePath(id), new Blob([file.data], { type: 'application/pdf' }), { contentType: 'application/pdf', upsert: false })
+        .from(bucket)
+        .upload(path, new Blob([file.data], { type }), { contentType: type, upsert: false })
       // Files are immutable, so "already exists" means an earlier upload landed.
       if (error && !isDuplicate(error)) throw new Error(error.message)
       await db.files.update(id, { dirty: 0 })
@@ -195,15 +201,19 @@ class SyncEngine {
   }
 
   /** Fetches a file from Storage and keeps it locally for offline use. */
-  async downloadFile(fileId: string): Promise<ArrayBuffer> {
+  async downloadFile(fileId: string, type = 'application/pdf'): Promise<ArrayBuffer> {
     const existing = this.downloads.get(fileId)
     if (existing) return existing
     const p = (async () => {
-      if (!this.userId) throw new Error('Inicia sesión para descargar este PDF')
-      const { data, error } = await supabase.storage.from(FILES_BUCKET).download(this.filePath(fileId))
+      if (!this.userId) throw new Error('Inicia sesión para descargar este archivo')
+      const { bucket, path } = storageLocation(this.userId, fileId, type)
+      let { data, error } = await supabase.storage.from(bucket).download(path)
+      // Images are stored as .jpg or .png; the page only knows it is an image.
+      if (!data && type === 'image/jpeg') ({ data, error } = await supabase.storage.from(bucket).download(storageLocation(this.userId, fileId, 'image/png').path))
       if (error || !data) throw new Error(error?.message ?? 'Download failed')
       const bytes = await data.arrayBuffer()
-      const row: FileRow = { id: fileId, data: bytes, size: bytes.byteLength, dirty: 0 }
+      const stored = type === 'application/pdf' ? type : data.type.startsWith('image/') ? data.type : type
+      const row: FileRow = { id: fileId, type: stored, data: bytes, size: bytes.byteLength, dirty: 0 }
       // Never overwrite a local copy that still has to be uploaded.
       await db.transaction('rw', db.files, async () => {
         if (!(await db.files.get(fileId))) await db.files.add(row)
@@ -217,20 +227,24 @@ class SyncEngine {
 
   private downloads = new Map<string, Promise<ArrayBuffer>>()
 
-  /** Downloads PDFs that live pages reference but this device lacks, so they open offline later. */
+  /** Downloads PDFs and images that live pages reference but this device lacks, so they open offline later. */
   private async prefetchFiles() {
-    const ids = new Set<string>()
+    const ids = new Map<string, string>()
     await db.pages.each((p) => {
       const bg = !p.deleted && parseBackground(p.background)
-      if (bg) ids.add(bg.fileId)
+      if (bg) ids.set(bg.fileId, 'application/pdf')
+    })
+    await db.strokes.each((s) => {
+      const id = !s.deleted && imageFileId(s)
+      if (id) ids.set(id, 'image/jpeg')
     })
     const have = new Set(await db.files.toCollection().primaryKeys())
-    for (const id of ids) {
+    for (const [id, type] of ids) {
       if (have.has(id) || !this.userId || !navigator.onLine) continue
       try {
-        await this.downloadFile(id)
+        await this.downloadFile(id, type)
       } catch (e) {
-        console.warn('PDF prefetch failed', id, e)
+        console.warn('File prefetch failed', id, e)
       }
     }
   }

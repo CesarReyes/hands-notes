@@ -1,4 +1,5 @@
 import { getStroke, type StrokeOptions } from 'perfect-freehand'
+import { imageBitmap, imageFileId, imageRect } from './images'
 import type { Paper, PenStyle, StrokeRow, Template } from './types'
 
 export const PAPER_COLORS: Record<Paper, { bg: string; line: string; margin: string }> = {
@@ -79,7 +80,27 @@ export function inkColor(color: string, paper: Paper): string {
   return color
 }
 
+/** A placed image, or a placeholder while its bytes load. */
+export function drawImageItem(ctx: CanvasRenderingContext2D, s: StrokeRow, fileId: string) {
+  const r = imageRect(s)
+  const w = r.maxX - r.minX, h = r.maxY - r.minY
+  const bmp = imageBitmap(fileId)
+  if (bmp) {
+    ctx.drawImage(bmp, r.minX, r.minY, w, h)
+    return
+  }
+  ctx.fillStyle = 'rgba(154,161,173,0.18)'
+  ctx.fillRect(r.minX, r.minY, w, h)
+  ctx.fillStyle = '#9aa1ad'
+  ctx.font = '22px system-ui, sans-serif'
+  ctx.textAlign = 'center'
+  ctx.fillText('Cargando imagen…', r.minX + w / 2, r.minY + h / 2)
+  ctx.textAlign = 'start'
+}
+
 export function drawStroke(ctx: CanvasRenderingContext2D, s: StrokeRow, paper: Paper) {
+  const fileId = imageFileId(s)
+  if (fileId) return drawImageItem(ctx, s, fileId)
   ctx.fillStyle = inkColor(s.color, paper)
   if (s.tool === 'highlighter') {
     ctx.globalAlpha = HIGHLIGHTER_ALPHA
@@ -192,7 +213,8 @@ export function drawPage(
 ) {
   if (page.background) drawBackground(ctx, background, page.width, page.height)
   else drawPaper(ctx, page.template, page.paper, page.width, page.height)
-  // Highlighter sits beneath pen ink, as on paper.
+  // Images sit beneath all ink, and highlighter beneath pen ink, as on paper.
+  for (const s of strokes) if (imageFileId(s)) drawStroke(ctx, s, page.paper)
   for (const s of strokes) if (s.tool === 'highlighter') drawStroke(ctx, s, page.paper)
-  for (const s of strokes) if (s.tool !== 'highlighter') drawStroke(ctx, s, page.paper)
+  for (const s of strokes) if (s.tool !== 'highlighter' && !imageFileId(s)) drawStroke(ctx, s, page.paper)
 }

@@ -4,7 +4,8 @@ import { db } from '../data/db'
 import { addPage, duplicatePage, liveStrokes, livePages, movePage, putStrokes, strokeEvents, touchNotebook, updateNotebook, updatePage, type StrokeEventDetail } from '../data/repo'
 import { Editor, type SelectionInfo } from '../engine/Editor'
 import { exportNotebookPdf } from '../engine/pdf'
-import { loadFileBytes } from '../data/files'
+import { loadFileBytes, loadImageFile, saveImageFile } from '../data/files'
+import { MAX_IMAGE_BYTES, prepareImage, rememberImage } from '../engine/images'
 import type { PageRow, Paper, PenStyle, StrokeRow, Template, Tool } from '../engine/types'
 import { editorSettingsOf, ERASER_SIZES, HIGHLIGHTER_SIZES, PEN_SIZES, useSettings } from '../store/settings'
 import { MenuItem, Popover, Segmented, Toggle } from './common'
@@ -16,6 +17,7 @@ import {
   IconDownload,
   IconEraser,
   IconHighlighter,
+  IconImage,
   IconLasso,
   IconMore,
   IconPages,
@@ -48,6 +50,7 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
   const [toast, setToast] = useState<string | null>(null)
   const [editingTitle, setEditingTitle] = useState(false)
   const touchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const imageInput = useRef<HTMLInputElement>(null)
 
   const showToast = useCallback((msg: string) => {
     setToast(msg)
@@ -150,6 +153,37 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
     setTimeout(() => editorRef.current?.scrollToPage(view.pageIndex + 1), 120)
   }
 
+  const insertImage = useCallback(
+    async (file: Blob) => {
+      try {
+        const img = await prepareImage(file)
+        if (img.data.byteLength > MAX_IMAGE_BYTES) throw new Error('too big')
+        const fileId = await saveImageFile(img.data, img.type)
+        rememberImage(fileId, img.bitmap)
+        // Switch to the lasso so the new image can be moved and resized right away.
+        useSettings.getState().set({ tool: 'lasso' })
+        editorRef.current?.insertImage(fileId, img.width, img.height)
+      } catch (e) {
+        console.warn('Image insert failed', e)
+        showToast('No se pudo insertar la imagen')
+      }
+    },
+    [showToast],
+  )
+
+  // Paste a screenshot or copied image straight onto the page.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      if ((e.target as HTMLElement)?.closest('input, textarea')) return
+      const file = [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'))
+      if (!file) return
+      e.preventDefault()
+      void insertImage(file)
+    }
+    window.addEventListener('paste', onPaste)
+    return () => window.removeEventListener('paste', onPaste)
+  }, [insertImage])
+
   const exportPdf = async () => {
     if (!pages?.length) return
     showToast('Generando PDF…')
@@ -160,7 +194,7 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
       byPage.get(s.page_id)!.push(s)
     }
     try {
-      await exportNotebookPdf(notebook?.title ?? 'Notas', pages, byPage, loadFileBytes)
+      await exportNotebookPdf(notebook?.title ?? 'Notas', pages, byPage, loadFileBytes, loadImageFile)
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'No se pudo exportar')
     }
@@ -204,6 +238,20 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
           <ToolButton tool="lasso" label="Lazo" active={settings.tool} onSelect={selectTool}>
             <IconLasso />
           </ToolButton>
+          <button className="icon-btn" onClick={() => imageInput.current?.click()} aria-label="Insertar imagen" title="Insertar imagen">
+            <IconImage />
+          </button>
+          <input
+            ref={imageInput}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0]
+              e.target.value = ''
+              if (file) void insertImage(file)
+            }}
+          />
           <span className="divider" />
           <ToolOptions />
         </div>
@@ -405,7 +453,7 @@ function SelectionMenu({ info, onDelete, onDuplicate, onColor }: { info: Selecti
   return (
     <div className="selection-menu" style={{ left: Math.max(8, x + width / 2), top }} onPointerDown={(e) => e.stopPropagation()}>
       <span className="count">{info.count}</span>
-      {palette.map((c) => (
+      {info.colorable && palette.map((c) => (
         <button key={c} className="swatch tiny" style={{ background: c }} onClick={() => onColor(c)} aria-label={`Cambiar a ${c}`} />
       ))}
       <button className="icon-btn small" onClick={onDuplicate} aria-label="Duplicar">

@@ -1,6 +1,7 @@
 import { nextTimestamp } from '../data/clock'
 import { uuidv7 } from '../data/ids'
 import {
+  pointInPolygon,
   pointsBounds,
   polylineHitsCircle,
   rectsIntersect,
@@ -11,6 +12,7 @@ import {
   unionRect,
 } from './geometry'
 import { History, type StrokeChange } from './history'
+import { imageEvents, imageFileId, imagePoints, imageRect, imageTool, isImage } from './images'
 import { backgroundEvents, backgroundImage } from './pdfBackgrounds'
 import { drawPage, drawStroke, HIGHLIGHTER_ALPHA, inkColor, outlineToPath, strokeOutline } from './render'
 import type { PageRow, PenStyle, Rect, StrokeRow, Tool } from './types'
@@ -32,6 +34,8 @@ export interface EditorSettings {
 
 export interface SelectionInfo {
   count: number
+  /** Whether any selected item takes a color (images don't). */
+  colorable: boolean
   /** Selection bounds in container (CSS px) coordinates. */
   screenRect: { x: number; y: number; width: number; height: number }
 }
@@ -75,6 +79,7 @@ type Action =
   | { kind: 'erase'; pointerId: number; pageId: string; removed: Map<string, StrokeRow>; added: StrokeRow[]; last: { x: number; y: number } | null }
   | { kind: 'lasso'; pointerId: number; pageId: string; poly: number[] }
   | { kind: 'move'; pointerId: number; pageId: string; start: { x: number; y: number }; dx: number; dy: number }
+  | { kind: 'resize'; pointerId: number; pageId: string; id: string; anchor: { x: number; y: number }; aspect: number; rect: Rect }
   | { kind: 'pan'; pointerId: number; last: { x: number; y: number }; vx: number; vy: number; t: number }
 
 const PAGE_GAP = 28
@@ -83,6 +88,10 @@ const MARGIN = 16
 const MAX_CACHE_PIXELS = 6_500_000
 const MAX_CACHED_PAGES = 4
 const HOLD_MS = 550
+/** Resize handle hit radius, in screen px. */
+const HANDLE_PX = 22
+/** Smallest image side, in page units. */
+const MIN_IMAGE = 24
 const TAP_MS = 260
 
 export class Editor {
@@ -161,6 +170,7 @@ export class Editor {
     container.addEventListener('gesturestart', preventDefault as EventListener)
 
     backgroundEvents.addEventListener('ready', this.onBackgroundReady)
+    imageEvents.addEventListener('ready', this.onImageReady)
 
     this.resizeObserver = new ResizeObserver(() => this.resize())
     this.resizeObserver.observe(container)
@@ -173,6 +183,7 @@ export class Editor {
     if (this.momentum) cancelAnimationFrame(this.momentum)
     this.resizeObserver.disconnect()
     backgroundEvents.removeEventListener('ready', this.onBackgroundReady)
+    imageEvents.removeEventListener('ready', this.onImageReady)
     this.container.removeEventListener('pointerdown', this.onPointerDown)
     this.container.removeEventListener('pointermove', this.onPointerMove)
     this.container.removeEventListener('pointerup', this.onPointerUp)
@@ -273,7 +284,8 @@ export class Editor {
       }
       if (!after.deleted) this.insert(after, true)
       pagesTouched.add(after.page_id)
-      if (after.tool === 'highlighter' || !before.deleted) incremental = false
+      // Images and highlighter sit under existing ink, so the page must be redrawn in order.
+      if (after.tool === 'highlighter' || isImage(after) || !before.deleted) incremental = false
     }
     // Fast path: a single new pen stroke is painted onto the cached bitmap instead of re-rendering the page.
     if (incremental && changes.length === 1) {
@@ -337,7 +349,7 @@ export class Editor {
     if (!this.selection) return
     const changes = [...this.selection.ids].flatMap((id) => {
       const s = this.byId.get(id)
-      return s ? [{ before: s, after: { ...s, color, updated_at: nextTimestamp() } }] : []
+      return s && !isImage(s) ? [{ before: s, after: { ...s, color, updated_at: nextTimestamp() } }] : []
     })
     this.commit(changes)
     this.emitSelection()
@@ -361,6 +373,47 @@ export class Editor {
     this.schedule()
   }
 
+  /**
+   * Places an image on the page in the middle of the view, scaled to fit, and
+   * selects it so it can be moved and resized right away.
+   */
+  insertImage(fileId: string, width: number, height: number) {
+    const lp = this.pageAt(this.height / 2) ?? this.pages[this.viewPageIndex()]
+    if (!lp) return
+    const { page } = lp
+    // Centre of the visible part of the page.
+    const top = Math.max(0, this.camY / this.zoom - lp.y)
+    const bottom = Math.min(page.height, (this.camY + this.height) / this.zoom - lp.y)
+    const left = Math.max(0, this.camX / this.zoom)
+    const right = Math.min(page.width, (this.camX + this.width) / this.zoom)
+    const cx = (left + right) / 2
+    const cy = bottom > top ? (top + bottom) / 2 : page.height / 2
+    const maxW = Math.max(MIN_IMAGE, Math.min(page.width * 0.7, (right - left) * 0.8))
+    const maxH = Math.max(MIN_IMAGE, Math.min(page.height * 0.6, (bottom > top ? bottom - top : page.height) * 0.8))
+    // Never blow a small image up past one image pixel per screen pixel.
+    const k = Math.min(maxW / width, maxH / height, 1 / this.zoom)
+    const w = width * k, h = height * k
+    const x = Math.min(Math.max(0, cx - w / 2), Math.max(0, page.width - w))
+    const y = Math.min(Math.max(0, cy - h / 2), Math.max(0, page.height - h))
+    const item: StrokeRow = {
+      id: uuidv7(),
+      notebook_id: page.notebook_id,
+      page_id: page.id,
+      tool: imageTool(fileId),
+      color: '',
+      size: 0,
+      points: quantize(imagePoints({ minX: x, minY: y, maxX: x + w, maxY: y + h })),
+      updated_at: nextTimestamp(),
+      deleted: false,
+      dirty: 1,
+    }
+    this.commit([{ before: { ...item, deleted: true }, after: item }])
+    this.selection = { pageId: page.id, ids: new Set([item.id]) }
+    this.emitSelection()
+    this.needsLive = true
+    this.schedule()
+  }
+
   clearSelection() {
     if (!this.selection) return
     this.selection = null
@@ -374,9 +427,18 @@ export class Editor {
     let r: Rect | null = null
     for (const id of this.selection.ids) {
       const s = this.byId.get(id)
-      if (s) r = unionRect(r, pointsBounds(s.points, s.size))
+      if (!s) continue
+      if (this.action?.kind === 'resize' && this.action.id === id) r = unionRect(r, this.action.rect)
+      else r = unionRect(r, pointsBounds(s.points, s.size))
     }
     return r
+  }
+
+  /** The selected image when the selection is exactly one image (it gets resize handles). */
+  private selectedImage(): StrokeRow | null {
+    if (this.selection?.ids.size !== 1) return null
+    const s = this.byId.get([...this.selection.ids][0])
+    return s && isImage(s) ? s : null
   }
 
   private emitSelection() {
@@ -387,7 +449,11 @@ export class Editor {
     const dy = this.action?.kind === 'move' ? this.action.dy : 0
     const a = this.toScreen(lp, r.minX + dx, r.minY + dy)
     const b = this.toScreen(lp, r.maxX + dx, r.maxY + dy)
-    this.cb.onSelection({ count: this.selection!.ids.size, screenRect: { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y } })
+    const colorable = [...this.selection!.ids].some((id) => {
+      const s = this.byId.get(id)
+      return s && !isImage(s)
+    })
+    this.cb.onSelection({ count: this.selection!.ids.size, colorable, screenRect: { x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y } })
   }
 
   // ---------------------------------------------------------------- camera
@@ -446,11 +512,15 @@ export class Editor {
     this.settle()
   }
 
-  private emitView() {
+  private viewPageIndex() {
     const mid = (this.camY + this.height / 3) / this.zoom
     let pageIndex = 0
     for (let i = 0; i < this.pages.length; i++) if (this.pages[i].y <= mid) pageIndex = i
-    this.cb.onView({ pageIndex, zoom: this.zoom, fitZoom: this.fitZoom })
+    return pageIndex
+  }
+
+  private emitView() {
+    this.cb.onView({ pageIndex: this.viewPageIndex(), zoom: this.zoom, fitZoom: this.fitZoom })
   }
 
   private resize() {
@@ -577,14 +647,29 @@ export class Editor {
 
     if (tool === 'lasso') {
       const bounds = this.selectionBounds()
-      if (this.selection && this.selection.pageId === lp.page.id && bounds && inside(bounds, pt.x, pt.y, 12 / this.zoom)) {
-        this.action = { kind: 'move', pointerId: e.pointerId, pageId: lp.page.id, start: pt, dx: 0, dy: 0 }
-        this.selection.ids.forEach((id) => this.hidden.add(id))
+      const img = this.selectedImage()
+      const corner = img && img.page_id === lp.page.id ? this.handleAt(imageRect(img), pt.x, pt.y) : null
+      if (img && corner) {
+        const r = imageRect(img)
+        // Drag a corner; the opposite one stays put and the aspect ratio is kept.
+        const anchor = { x: corner.x === r.minX ? r.maxX : r.minX, y: corner.y === r.minY ? r.maxY : r.minY }
+        this.action = { kind: 'resize', pointerId: e.pointerId, pageId: lp.page.id, id: img.id, anchor, aspect: (r.maxX - r.minX) / Math.max(1e-3, r.maxY - r.minY), rect: r }
+        this.hidden.add(img.id)
         this.invalidate(lp.page.id)
         this.requestBase()
+      } else if (this.selection && this.selection.pageId === lp.page.id && bounds && inside(bounds, pt.x, pt.y, 12 / this.zoom)) {
+        this.startMove(e.pointerId, lp, pt)
       } else {
+        const hit = this.imageAt(lp.page.id, pt.x, pt.y)
         this.clearSelection()
-        this.action = { kind: 'lasso', pointerId: e.pointerId, pageId: lp.page.id, poly: [pt.x, pt.y] }
+        if (hit) {
+          // Images can be grabbed directly, without drawing a lasso around them.
+          this.selection = { pageId: lp.page.id, ids: new Set([hit.id]) }
+          this.emitSelection()
+          this.startMove(e.pointerId, lp, pt)
+        } else {
+          this.action = { kind: 'lasso', pointerId: e.pointerId, pageId: lp.page.id, poly: [pt.x, pt.y] }
+        }
       }
     } else if (tool === 'eraser') {
       this.action = { kind: 'erase', pointerId: e.pointerId, pageId: lp.page.id, removed: new Map(), added: [], last: null }
@@ -607,6 +692,30 @@ export class Editor {
     }
     this.needsLive = true
     this.schedule()
+  }
+
+  private startMove(pointerId: number, lp: LayoutPage, pt: { x: number; y: number }) {
+    this.action = { kind: 'move', pointerId, pageId: lp.page.id, start: pt, dx: 0, dy: 0 }
+    this.selection!.ids.forEach((id) => this.hidden.add(id))
+    this.invalidate(lp.page.id)
+    this.requestBase()
+  }
+
+  /** Topmost image under a page point. */
+  private imageAt(pageId: string, x: number, y: number): StrokeRow | null {
+    const list = this.strokes.get(pageId) ?? []
+    for (let i = list.length - 1; i >= 0; i--) {
+      const s = list[i]
+      if (isImage(s) && inside(imageRect(s), x, y, 0)) return s
+    }
+    return null
+  }
+
+  /** The corner of `r` whose handle is under a page point, if any. */
+  private handleAt(r: Rect, x: number, y: number): { x: number; y: number } | null {
+    const reach = HANDLE_PX / this.zoom
+    for (const c of corners(r)) if (Math.hypot(x - c.x, y - c.y) <= reach) return c
+    return null
   }
 
   private onPointerMove = (e: PointerEvent) => {
@@ -682,6 +791,16 @@ export class Editor {
       a.dx = pt.x - a.start.x
       a.dy = pt.y - a.start.y
       this.emitSelection()
+    } else if (a.kind === 'resize') {
+      const pt = this.toPage(lp, p.x, p.y)
+      const dx = pt.x - a.anchor.x, dy = pt.y - a.anchor.y
+      // Follow whichever axis the finger moved further along, keeping the aspect ratio.
+      const w = Math.max(MIN_IMAGE, Math.abs(dx), Math.abs(dy) * a.aspect)
+      const h = w / a.aspect
+      const x0 = dx < 0 ? a.anchor.x - w : a.anchor.x
+      const y0 = dy < 0 ? a.anchor.y - h : a.anchor.y
+      a.rect = { minX: x0, minY: y0, maxX: x0 + w, maxY: y0 + h }
+      this.emitSelection()
     }
     this.needsLive = true
     this.schedule()
@@ -728,6 +847,11 @@ export class Editor {
         this.requestBase()
       }
       this.emitSelection()
+    } else if (a.kind === 'resize') {
+      this.hidden.delete(a.id)
+      const s = this.byId.get(a.id)
+      if (s) this.commit([{ before: s, after: { ...s, points: quantize(imagePoints(a.rect)), updated_at: nextTimestamp() } }])
+      this.emitSelection()
     }
     this.needsLive = true
     this.settle()
@@ -758,6 +882,11 @@ export class Editor {
     if (a?.kind === 'move') {
       this.selection?.ids.forEach((id) => this.hidden.delete(id))
       this.invalidate(a.pageId)
+    }
+    if (a?.kind === 'resize') {
+      this.hidden.delete(a.id)
+      this.invalidate(a.pageId)
+      this.emitSelection()
     }
     this.needsLive = true
     this.requestBase()
@@ -925,7 +1054,8 @@ export class Editor {
       const cy = from.y + ((y - from.y) * i) / steps
       const hit: Rect = { minX: cx - r, minY: cy - r, maxX: cx + r, maxY: cy + r }
       for (const s of [...list]) {
-        if (!rectsIntersect(hit, pointsBounds(s.points, s.size / 2))) continue
+        // The eraser only takes ink; images are removed through the lasso.
+        if (isImage(s) || !rectsIntersect(hit, pointsBounds(s.points, s.size / 2))) continue
         if (this.settings.eraserMode === 'stroke') {
           if (!polylineHitsCircle(s.points, cx, cy, r + s.size / 2)) continue
           this.removeForErase(a, s)
@@ -958,7 +1088,12 @@ export class Editor {
 
   private finishLasso(a: Extract<Action, { kind: 'lasso' }>) {
     const ids = new Set<string>()
-    for (const s of this.strokes.get(a.pageId) ?? []) if (strokeInLasso(s.points, a.poly)) ids.add(s.id)
+    for (const s of this.strokes.get(a.pageId) ?? []) {
+      if (isImage(s)) {
+        const r = imageRect(s)
+        if (pointInPolygon((r.minX + r.maxX) / 2, (r.minY + r.maxY) / 2, a.poly)) ids.add(s.id)
+      } else if (strokeInLasso(s.points, a.poly)) ids.add(s.id)
+    }
     if (ids.size) {
       this.selection = { pageId: a.pageId, ids }
       this.emitSelection()
@@ -987,6 +1122,19 @@ export class Editor {
     for (const { page } of this.pages) {
       if (page.background && (ref === null || page.background === ref)) {
         this.invalidate(page.id)
+        hit = true
+      }
+    }
+    if (hit) this.requestBase()
+  }
+
+  /** An image finished loading: redraw the pages that show it. */
+  private onImageReady = (e: Event) => {
+    const fileId = (e as CustomEvent<string>).detail
+    let hit = false
+    for (const [pageId, list] of this.strokes) {
+      if (list.some((s) => imageFileId(s) === fileId)) {
+        this.invalidate(pageId)
         hit = true
       }
     }
@@ -1191,16 +1339,32 @@ export class Editor {
     this.pageTransform(ctx, lp, false)
     ctx.translate(dx, dy)
     if (a?.kind === 'move') {
-      for (const id of sel.ids) {
-        const s = this.byId.get(id)
-        if (s) drawStroke(ctx, s, lp.page.paper)
-      }
+      // Images first, so ink being moved with them stays on top.
+      const moving = [...sel.ids].flatMap((id) => this.byId.get(id) ?? [])
+      for (const s of moving) if (isImage(s)) drawStroke(ctx, s, lp.page.paper)
+      for (const s of moving) if (!isImage(s)) drawStroke(ctx, s, lp.page.paper)
+    } else if (a?.kind === 'resize') {
+      const s = this.byId.get(a.id)
+      if (s) drawStroke(ctx, { ...s, points: imagePoints(a.rect) }, lp.page.paper)
     }
-    const pad = 6 / this.zoom
+    const img = this.selectedImage()
+    const pad = img ? 0 : 6 / this.zoom
     ctx.setLineDash([5 / this.zoom, 4 / this.zoom])
     ctx.lineWidth = 1.5 / this.zoom
     ctx.strokeStyle = '#3b5bdb'
     ctx.strokeRect(bounds.minX - pad, bounds.minY - pad, bounds.maxX - bounds.minX + pad * 2, bounds.maxY - bounds.minY + pad * 2)
+    ctx.setLineDash([])
+    if (img) {
+      const r = 7 / this.zoom
+      ctx.fillStyle = '#ffffff'
+      ctx.lineWidth = 2 / this.zoom
+      for (const c of corners(bounds)) {
+        ctx.beginPath()
+        ctx.arc(c.x, c.y, r, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.stroke()
+      }
+    }
     ctx.restore()
   }
 }
@@ -1229,6 +1393,15 @@ function centroid(pts: { x: number; y: number }[]) {
     y += p.y
   }
   return { x: x / pts.length, y: y / pts.length }
+}
+
+function corners(r: Rect) {
+  return [
+    { x: r.minX, y: r.minY },
+    { x: r.maxX, y: r.minY },
+    { x: r.minX, y: r.maxY },
+    { x: r.maxX, y: r.maxY },
+  ]
 }
 
 function inside(r: Rect, x: number, y: number, pad: number) {

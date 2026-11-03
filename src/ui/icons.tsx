@@ -69,6 +69,13 @@ export const IconPlus = (p: P) => (
     <path d="M12 5v14M5 12h14" />
   </Icon>
 )
+export const IconImage = (p: P) => (
+  <Icon {...p}>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="2" />
+    <circle cx="9" cy="10" r="1.8" />
+    <path d="M20.5 16l-5-5L6 19.5" />
+  </Icon>
+)
 export const IconPages = (p: P) => (
   <Icon {...p}>
     <rect x="4" y="3" width="7" height="9" rx="1.5" />

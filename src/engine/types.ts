@@ -34,9 +34,11 @@ export interface PageRow {
   dirty: 0 | 1
 }
 
-/** An imported document, cached locally and mirrored to Supabase Storage. Its bytes never change. */
+/** An imported document or image, cached locally and mirrored to Supabase Storage. Its bytes never change. */
 export interface FileRow {
   id: string
+  /** MIME type; rows from before images existed have none and are PDFs. */
+  type?: string
   /** Raw bytes (ArrayBuffer rather than Blob: older iOS Safari mishandles Blobs in IndexedDB). */
   data: ArrayBuffer
   size: number

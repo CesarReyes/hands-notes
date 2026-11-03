@@ -1,6 +1,7 @@
 import type { jsPDF as JsPDF } from 'jspdf'
 import type { PDFDocument as PdfLibDocument } from 'pdf-lib'
 import { parseBackground, type PdfBackground } from './background'
+import { imageFileId, imageRect } from './images'
 import { HIGHLIGHTER_ALPHA, inkColor, PAPER_COLORS, strokeOutline } from './render'
 import type { PageRow, StrokeRow } from './types'
 
@@ -16,8 +17,22 @@ export async function exportNotebookPdf(
   pages: PageRow[],
   strokesByPage: Map<string, StrokeRow[]>,
   loadFile: (fileId: string) => Promise<ArrayBuffer>,
+  loadImage: (fileId: string) => Promise<{ data: ArrayBuffer; type: string }>,
 ) {
   const { jsPDF, GState } = await import('jspdf')
+  // Fetch every placed image up front; one that can't be loaded is left out rather than failing the export.
+  const images = new Map<string, { data: Uint8Array; format: 'JPEG' | 'PNG' }>()
+  const imageIds = new Set([...strokesByPage.values()].flat().flatMap((s) => imageFileId(s) ?? []))
+  await Promise.all(
+    [...imageIds].map(async (id) => {
+      try {
+        const { data, type } = await loadImage(id)
+        images.set(id, { data: new Uint8Array(data), format: type === 'image/png' ? 'PNG' : 'JPEG' })
+      } catch (e) {
+        console.warn('Image left out of PDF', id, e)
+      }
+    }),
+  )
   const first = pages[0]
   const k = A4_WIDTH_PT / (first?.width ?? 1000)
   // jsPDF swaps [w, h] to match the orientation (portrait by default), so always pass it.
@@ -31,7 +46,16 @@ export async function exportNotebookPdf(
     // Background pages stay transparent here; the original page goes underneath later.
     if (!parseBackground(page.background)) drawPaperPdf(doc, page, k)
     const strokes = (strokesByPage.get(page.id) ?? []).slice().sort((a, b) => (a.id < b.id ? -1 : 1))
-    const ordered = [...strokes.filter((s) => s.tool === 'highlighter'), ...strokes.filter((s) => s.tool !== 'highlighter')]
+    for (const s of strokes) {
+      const fileId = imageFileId(s)
+      const img = fileId && images.get(fileId)
+      if (!img) continue
+      const r = imageRect(s)
+      // The file id as alias lets jsPDF embed an image used on several pages only once.
+      doc.addImage(img.data, img.format, r.minX * k, r.minY * k, (r.maxX - r.minX) * k, (r.maxY - r.minY) * k, fileId, 'NONE')
+    }
+    const ink = strokes.filter((s) => !imageFileId(s))
+    const ordered = [...ink.filter((s) => s.tool === 'highlighter'), ...ink.filter((s) => s.tool !== 'highlighter')]
     for (const s of ordered) {
       const outline = strokeOutline(s.tool, s.size, s.points)
       if (outline.length < 3) continue

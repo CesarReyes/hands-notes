@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { backgroundEvents, backgroundImage } from '../engine/pdfBackgrounds'
+import { imageEvents, imageFileId } from '../engine/images'
 import { drawPage } from '../engine/render'
 import type { PageRow, StrokeRow } from '../engine/types'
 
-/** Small rendering of a page; redraws whenever its strokes or background bitmap change. */
+/** Small rendering of a page; redraws whenever its strokes, background or image bitmaps change. */
 export function PageThumb({ page, strokes, width }: { page: PageRow; strokes: StrokeRow[]; width: number }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const height = Math.round((width * page.height) / page.width)
@@ -17,6 +18,14 @@ export function PageThumb({ page, strokes, width }: { page: PageRow; strokes: St
     backgroundEvents.addEventListener('ready', onReady)
     return () => backgroundEvents.removeEventListener('ready', onReady)
   }, [page.background])
+  const imageIds = strokes.flatMap((s) => imageFileId(s) ?? []).join(',')
+  useEffect(() => {
+    if (!imageIds) return
+    const ids = new Set(imageIds.split(','))
+    const onReady = (e: Event) => ids.has((e as CustomEvent<string>).detail) && setBgVersion((v) => v + 1)
+    imageEvents.addEventListener('ready', onReady)
+    return () => imageEvents.removeEventListener('ready', onReady)
+  }, [imageIds])
   useEffect(() => {
     const c = ref.current
     if (!c) return

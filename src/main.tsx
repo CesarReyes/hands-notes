@@ -2,8 +2,9 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { registerSW } from 'virtual:pwa-register'
 import { App } from './App'
-import { loadFileBytes } from './data/files'
+import { loadFileBytes, loadImageFile } from './data/files'
 import { setFileLoader } from './engine/pdfBackgrounds'
+import { setImageLoader } from './engine/images'
 import { initAuth } from './store/auth'
 import './styles.css'
 
@@ -17,6 +18,7 @@ media.addEventListener('change', applyTheme)
 void navigator.storage?.persist?.()
 
 setFileLoader(loadFileBytes)
+setImageLoader(loadImageFile)
 registerSW({ immediate: true })
 initAuth()
 
