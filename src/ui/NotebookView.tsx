@@ -33,6 +33,23 @@ import { PAPER_LABELS, TEMPLATE_LABELS } from './Library'
 import { PageThumb } from './PageThumb'
 import { SyncBadge } from './SyncBadge'
 
+/** The page last viewed in each notebook, per device, so reopening it lands where you left off. */
+const lastPageKey = (notebookId: string) => `hands-notes-last-page:${notebookId}`
+function readLastPage(notebookId: string): string | null {
+  try {
+    return localStorage.getItem(lastPageKey(notebookId))
+  } catch {
+    return null
+  }
+}
+function writeLastPage(notebookId: string, pageId: string) {
+  try {
+    localStorage.setItem(lastPageKey(notebookId), pageId)
+  } catch {
+    /* ignore */
+  }
+}
+
 const PEN_STYLE_LABELS: Record<PenStyle, string> = { fountain: 'Pluma fuente', ballpoint: 'Bolígrafo', brush: 'Pincel' }
 
 export function NotebookView({ notebookId, onBack }: { notebookId: string; onBack(): void }) {
@@ -104,9 +121,19 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
     }
   }, [notebookId, showToast])
 
+  const restoredPage = useRef(false)
   useEffect(() => {
-    if (pages) editorRef.current?.setPages(pages)
-  }, [pages])
+    const editor = editorRef.current
+    if (!pages || !editor) return
+    editor.setPages(pages)
+    // On the first layout, jump to the page that was open last time.
+    if (!restoredPage.current && pages.length) {
+      restoredPage.current = true
+      const last = readLastPage(notebookId)
+      const index = last ? pages.findIndex((p) => p.id === last) : -1
+      if (index > 0) editor.scrollToPage(index)
+    }
+  }, [pages, notebookId])
 
   useEffect(() => {
     editorRef.current?.setSettings(editorSettingsOf(settings))
@@ -140,6 +167,10 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
   }, [])
 
   const currentPage: PageRow | undefined = pages?.[Math.min(view.pageIndex, (pages?.length ?? 1) - 1)]
+
+  useEffect(() => {
+    if (restoredPage.current && currentPage) writeLastPage(notebookId, currentPage.id)
+  }, [notebookId, currentPage?.id])
 
   const selectTool = (tool: Tool, anchor: HTMLElement) => {
     if (settings.tool === tool && tool !== 'lasso') setToolMenu({ tool, anchor })
