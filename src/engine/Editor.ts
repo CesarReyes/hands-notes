@@ -50,8 +50,10 @@ export interface EditorCallbacks {
   onStylusDetected?(): void
 }
 
+/** Pages sit side by side like a book's spreads; `x` is the page's left edge in document units. */
 interface LayoutPage {
   page: PageRow
+  x: number
   y: number
 }
 
@@ -66,6 +68,8 @@ interface Gesture {
   last: { x: number; y: number; t: number }
   vx: number
   vy: number
+  /** One-finger drags at fit zoom lock to an axis: sideways turns pages, up/down scrolls the page. */
+  lock: 'x' | 'y' | null
 }
 
 interface CacheEntry {
@@ -82,7 +86,9 @@ type Action =
   | { kind: 'resize'; pointerId: number; pageId: string; id: string; anchor: { x: number; y: number }; aspect: number; rect: Rect }
   | { kind: 'pan'; pointerId: number; last: { x: number; y: number }; vx: number; vy: number; t: number }
 
-const PAGE_GAP = 28
+const PAGE_GAP = 48
+/** Page-turn slide duration. */
+const TURN_MS = 280
 const MARGIN = 16
 /** Upper bound on cached page bitmap size; above this we draw directly (deep zoom). */
 const MAX_CACHE_PIXELS = 6_500_000
@@ -104,7 +110,14 @@ export class Editor {
   private height = 0
 
   private pages: LayoutPage[] = []
-  private docHeight = 0
+  /** Index of the page being read; the camera stays on it except mid-turn. */
+  private cur = 0
+  /** While true the camera may slide sideways across pages (a turn in progress). */
+  private turning = false
+  private turnAnim: number | null = null
+  private turnTarget = { x: 0, y: 0 }
+  private wheelQuietUntil = 0
+  private wheelTimer: ReturnType<typeof setTimeout> | null = null
   private strokes = new Map<string, StrokeRow[]>() // pageId → strokes sorted by id
   private byId = new Map<string, StrokeRow>()
   private cache = new Map<string, CacheEntry>()
@@ -181,6 +194,8 @@ export class Editor {
     this.disposed = true
     cancelAnimationFrame(this.frame)
     if (this.momentum) cancelAnimationFrame(this.momentum)
+    if (this.turnAnim) cancelAnimationFrame(this.turnAnim)
+    if (this.wheelTimer) clearTimeout(this.wheelTimer)
     this.resizeObserver.disconnect()
     backgroundEvents.removeEventListener('ready', this.onBackgroundReady)
     imageEvents.removeEventListener('ready', this.onImageReady)
@@ -208,15 +223,19 @@ export class Editor {
 
   setPages(pages: PageRow[]) {
     const prev = new Map(this.pages.map((p) => [p.page.id, p.page]))
-    let y = 0
+    const curId = this.pages[this.cur]?.page.id
+    let x = 0
     this.pages = pages.map((page) => {
-      const lp = { page, y }
-      y += page.height + PAGE_GAP
+      const lp = { page, x, y: 0 }
+      x += page.width + PAGE_GAP
       const old = prev.get(page.id)
       if (old && (old.template !== page.template || old.paper !== page.paper || old.background !== page.background)) this.invalidate(page.id)
       return lp
     })
-    this.docHeight = Math.max(0, y - PAGE_GAP)
+    // Stay on the same page when pages are added, moved or removed elsewhere.
+    const kept = curId ? this.pages.findIndex((lp) => lp.page.id === curId) : -1
+    const cur = kept >= 0 ? kept : Math.min(this.cur, this.pages.length - 1)
+    this.cur = Math.max(0, cur)
     if (!this.zoomInitialized && this.width > 0) this.initZoom()
     this.clampCamera()
     this.requestBase()
@@ -378,14 +397,14 @@ export class Editor {
    * selects it so it can be moved and resized right away.
    */
   insertImage(fileId: string, width: number, height: number) {
-    const lp = this.pageAt(this.height / 2) ?? this.pages[this.viewPageIndex()]
+    const lp = this.pages[this.cur]
     if (!lp) return
     const { page } = lp
     // Centre of the visible part of the page.
     const top = Math.max(0, this.camY / this.zoom - lp.y)
     const bottom = Math.min(page.height, (this.camY + this.height) / this.zoom - lp.y)
-    const left = Math.max(0, this.camX / this.zoom)
-    const right = Math.min(page.width, (this.camX + this.width) / this.zoom)
+    const left = Math.max(0, this.camX / this.zoom - lp.x)
+    const right = Math.min(page.width, (this.camX + this.width) / this.zoom - lp.x)
     const cx = (left + right) / 2
     const cy = bottom > top ? (top + bottom) / 2 : page.height / 2
     const maxW = Math.max(MIN_IMAGE, Math.min(page.width * 0.7, (right - left) * 0.8))
@@ -475,14 +494,37 @@ export class Editor {
     return this.pages[0]?.page.width ?? 1000
   }
 
+  /** Camera X range that keeps page `i` in view: centred when it fits, else pannable edge to edge. */
+  private xRange(i: number) {
+    const lp = this.pages[i]
+    if (!lp) return { min: 0, max: 0 }
+    const left = lp.x * this.zoom
+    const w = lp.page.width * this.zoom
+    if (w + MARGIN * 2 <= this.width) {
+      const c = left - (this.width - w) / 2
+      return { min: c, max: c }
+    }
+    return { min: left - MARGIN, max: left + w - this.width + MARGIN }
+  }
+
+  private yRange(i: number) {
+    const h = (this.pages[i]?.page.height ?? 0) * this.zoom
+    const min = -MARGIN
+    return { min, max: Math.max(min, h - this.height + MARGIN * 4) }
+  }
+
+  /** Keeps the camera on the current page; mid-turn it may slide across to the neighbours. */
   private clampCamera() {
-    const docW = this.pageWidth * this.zoom
-    if (docW + MARGIN * 2 <= this.width) this.camX = -(this.width - docW) / 2
-    else this.camX = Math.min(Math.max(this.camX, -MARGIN), docW - this.width + MARGIN)
-    const docH = this.docHeight * this.zoom
-    const minY = -MARGIN
-    const maxY = Math.max(minY, docH - this.height + MARGIN * 4)
-    this.camY = Math.min(Math.max(this.camY, minY), maxY)
+    const yr = this.yRange(this.cur)
+    this.camY = Math.min(Math.max(this.camY, yr.min), yr.max)
+    if (this.turning) {
+      const first = this.xRange(Math.max(0, this.cur - 1))
+      const last = this.xRange(Math.min(this.pages.length - 1, this.cur + 1))
+      this.camX = Math.min(Math.max(this.camX, first.min), last.max)
+    } else {
+      const xr = this.xRange(this.cur)
+      this.camX = Math.min(Math.max(this.camX, xr.min), xr.max)
+    }
   }
 
   private zoomAt(newZoom: number, sx: number, sy: number) {
@@ -495,13 +537,107 @@ export class Editor {
     this.clampCamera()
   }
 
-  scrollToPage(index: number) {
-    const lp = this.pages[index]
-    if (!lp) return
-    this.camY = lp.y * this.zoom - MARGIN
+  /** Shows page `index`; `animate` slides it in like turning a page. */
+  scrollToPage(index: number, animate = false) {
+    if (!this.pages[index]) return
+    this.stopMomentum()
+    if (!animate) {
+      this.stopTurn()
+      this.cur = index
+      this.camY = -MARGIN
+      this.camX = this.xRange(index).min
+      this.clampCamera()
+      this.requestBase()
+      this.emitView()
+      return
+    }
+    this.turnTo(index)
+  }
+
+  nextPage() {
+    this.scrollToPage(Math.min(this.cur + 1, this.pages.length - 1), true)
+  }
+
+  prevPage() {
+    this.scrollToPage(Math.max(this.cur - 1, 0), true)
+  }
+
+  /** Ends a sideways drag: turn to the neighbour if pulled far or flicked, otherwise settle back. */
+  private finishTurn(vx: number) {
+    const xr = this.xRange(this.cur)
+    const over = this.camX - xr.max // > 0: pulled toward the next page
+    const under = xr.min - this.camX // > 0: pulled toward the previous page
+    const far = Math.min(this.width * 0.2, 140)
+    let target = this.cur
+    if (over > far || (over > 12 && vx < -0.25)) target = this.cur + 1
+    else if (under > far || (under > 12 && vx > 0.25)) target = this.cur - 1
+    target = Math.min(Math.max(target, 0), this.pages.length - 1)
+    this.turnTo(target)
+  }
+
+  private turnTo(index: number) {
+    this.stopTurn()
+    const changing = index !== this.cur
+    const fromX = this.camX, fromY = this.camY
+    // A new page opens at its top, entered from the side it came in on.
+    const xr = this.xRange(index)
+    const toX = !changing ? Math.min(Math.max(fromX, xr.min), xr.max) : index > this.cur ? xr.min : xr.max
+    this.turning = true
+    this.cur = index
+    const yr = this.yRange(index)
+    const toY = changing ? yr.min : Math.min(Math.max(fromY, yr.min), yr.max)
+    this.turnTarget = { x: toX, y: toY }
+    const start = performance.now()
+    const dist = Math.abs(toX - fromX)
+    const duration = Math.min(TURN_MS, 90 + dist * 0.4)
+    this.interacting = true
+    const step = () => {
+      const t = Math.min(1, (performance.now() - start) / duration)
+      const e = 1 - Math.pow(1 - t, 3)
+      this.camX = fromX + (toX - fromX) * e
+      this.camY = changing ? fromY + (toY - fromY) * e : toY
+      this.requestBase()
+      if (t < 1) {
+        this.turnAnim = requestAnimationFrame(step)
+      } else {
+        this.turnAnim = null
+        this.turning = false
+        this.clampCamera()
+        this.emitView()
+        this.settle()
+      }
+    }
+    this.emitView()
+    this.turnAnim = requestAnimationFrame(step)
+  }
+
+  private stopTurn() {
+    if (this.turnAnim) cancelAnimationFrame(this.turnAnim)
+    this.turnAnim = null
+    this.turning = false
+  }
+
+  /** Jumps a running page turn to its end, so the pen can write right away. */
+  private completeTurn() {
+    if (!this.turnAnim) return
+    this.stopTurn()
+    this.camX = this.turnTarget.x
+    this.camY = this.turnTarget.y
     this.clampCamera()
     this.requestBase()
     this.emitView()
+  }
+
+  /** Ends a drag that may have slid sideways: turn or settle back, else keep scrolling the page. */
+  private endDrag(vx: number, vy: number, allowMomentum: boolean) {
+    const xr = this.xRange(this.cur)
+    if (this.camX < xr.min - 0.5 || this.camX > xr.max + 0.5) {
+      this.finishTurn(vx)
+      return
+    }
+    this.turning = false
+    this.clampCamera()
+    if (allowMomentum) this.startMomentum(0, vy)
   }
 
   resetZoom() {
@@ -513,10 +649,7 @@ export class Editor {
   }
 
   private viewPageIndex() {
-    const mid = (this.camY + this.height / 3) / this.zoom
-    let pageIndex = 0
-    for (let i = 0; i < this.pages.length; i++) if (this.pages[i].y <= mid) pageIndex = i
-    return pageIndex
+    return Math.min(this.cur, Math.max(0, this.pages.length - 1))
   }
 
   private emitView() {
@@ -556,7 +689,7 @@ export class Editor {
   }
 
   private toScreen(lp: LayoutPage, x: number, y: number) {
-    return { x: x * this.zoom - this.camX, y: (lp.y + y) * this.zoom - this.camY }
+    return { x: (lp.x + x) * this.zoom - this.camX, y: (lp.y + y) * this.zoom - this.camY }
   }
 
   private local(e: PointerEvent | WheelEvent) {
@@ -565,22 +698,24 @@ export class Editor {
   }
 
   private toPage(lp: LayoutPage, sx: number, sy: number) {
-    return { x: (sx + this.camX) / this.zoom, y: (sy + this.camY) / this.zoom - lp.y }
+    return { x: (sx + this.camX) / this.zoom - lp.x, y: (sy + this.camY) / this.zoom - lp.y }
   }
 
-  /** Page under a screen point; points in the gap snap to the nearest page. */
-  private pageAt(sy: number): LayoutPage | undefined {
+  /** Page under a screen point; points just outside a page's edge still count as on it. */
+  private pageAt(sx: number, sy: number): LayoutPage | undefined {
+    const docX = (sx + this.camX) / this.zoom
     const docY = (sy + this.camY) / this.zoom
+    const gap = (lo: number, hi: number, v: number) => (v < lo ? lo - v : v > hi ? v - hi : 0)
     let best: LayoutPage | undefined
     let bestDist = Infinity
     for (const lp of this.pages) {
-      const d = docY < lp.y ? lp.y - docY : docY > lp.y + lp.page.height ? docY - lp.y - lp.page.height : 0
+      const d = Math.max(gap(lp.x, lp.x + lp.page.width, docX), gap(lp.y, lp.y + lp.page.height, docY))
       if (d < bestDist) {
         bestDist = d
         best = lp
       }
     }
-    return bestDist <= PAGE_GAP ? best : undefined
+    return bestDist <= PAGE_GAP / 2 ? best : undefined
   }
 
   // ---------------------------------------------------------------- input
@@ -615,6 +750,9 @@ export class Editor {
       // A palm resting before the pen landed started a pan; the pen wins.
       this.gesture = null
       this.touches.clear()
+      this.turning = false
+      this.clampCamera()
+      this.requestBase()
     }
 
     if (e.pointerType === 'touch') {
@@ -630,12 +768,15 @@ export class Editor {
 
     if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) {
       this.capture(e.pointerId)
+      this.stopTurn()
+      this.turning = true
       this.action = { kind: 'pan', pointerId: e.pointerId, last: p, vx: 0, vy: 0, t: e.timeStamp }
       return
     }
 
     if (!this.isDrawingPointer(e) || this.action) return
-    const lp = this.pageAt(p.y)
+    this.completeTurn()
+    const lp = this.pageAt(p.x, p.y)
     if (!lp) return
     this.capture(e.pointerId)
     this.actionPointerType = e.pointerType
@@ -822,7 +963,7 @@ export class Editor {
     this.action = null
     this.interacting = false
     if (a.kind === 'pan') {
-      this.startMomentum(a.vx, a.vy)
+      this.endDrag(a.vx, a.vy, true)
     } else if (a.kind === 'ink') {
       this.finishInk(a)
     } else if (a.kind === 'erase') {
@@ -862,6 +1003,7 @@ export class Editor {
       this.touches.delete(e.pointerId)
       if (this.gesture && this.touches.size === 0) {
         this.gesture = null
+        this.endDrag(0, 0, false)
         this.settle()
       }
     }
@@ -899,8 +1041,24 @@ export class Editor {
     if (e.ctrlKey || e.metaKey) {
       // Trackpad pinch arrives as ctrl+wheel.
       this.zoomAt(this.zoom * Math.exp(-e.deltaY * 0.01), p.x, p.y)
+    } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY) || e.shiftKey) {
+      // Sideways trackpad swipe (or shift+wheel) turns the page.
+      const now = performance.now()
+      if (this.turnAnim || now < this.wheelQuietUntil) {
+        // Swallow the swipe's inertia tail so one swipe turns one page.
+        this.wheelQuietUntil = now + 200
+        return
+      }
+      this.turning = true
+      this.camX += e.deltaX || e.deltaY
+      this.clampCamera()
+      if (this.wheelTimer) clearTimeout(this.wheelTimer)
+      this.wheelTimer = setTimeout(() => {
+        this.wheelTimer = null
+        this.wheelQuietUntil = performance.now() + 200
+        this.endDrag(0, 0, false)
+      }, 90)
     } else {
-      this.camX += e.deltaX
       this.camY += e.deltaY
       this.clampCamera()
     }
@@ -916,6 +1074,8 @@ export class Editor {
     const pts = [...this.touches.values()]
     const mid = centroid(pts)
     const prev = this.gesture
+    if (!continuing) this.stopTurn()
+    this.turning = true
     this.gesture = {
       startDist: pts.length >= 2 ? Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) : 0,
       startZoom: this.zoom,
@@ -927,6 +1087,7 @@ export class Editor {
       last: { ...mid, t: performance.now() },
       vx: 0,
       vy: 0,
+      lock: continuing && prev && pts.length === 1 ? prev.lock : null,
     }
     this.interacting = true
   }
@@ -945,6 +1106,12 @@ export class Editor {
     this.zoom = g.startZoom
     this.camX = g.startCam.x - (mid.x - g.startMid.x)
     this.camY = g.startCam.y - (mid.y - g.startMid.y)
+    if (pts.length === 1 && Math.abs(this.zoom - this.fitZoom) < 0.001) {
+      const dx = mid.x - g.startMid.x, dy = mid.y - g.startMid.y
+      if (!g.lock && Math.hypot(dx, dy) > 8) g.lock = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y'
+      if (g.lock === 'x') this.camY = g.startCam.y
+      else this.camX = g.startCam.x
+    }
     if (pts.length >= 2 && g.startDist > 0) {
       const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
       if (Math.abs(dist - g.startDist) > 10) g.moved = true
@@ -968,9 +1135,9 @@ export class Editor {
     if (quick && !g.moved) {
       if (g.maxTouches === 2) this.undo()
       else if (g.maxTouches >= 3) this.redo()
-    } else if (g.maxTouches === 1 && performance.now() - g.last.t < 60) {
-      this.startMomentum(g.vx, g.vy)
     }
+    const fresh = performance.now() - g.last.t < 60
+    this.endDrag(fresh ? g.vx : 0, g.vy, g.maxTouches === 1 && fresh && g.lock !== 'x')
     this.settle()
   }
 
@@ -1158,7 +1325,7 @@ export class Editor {
   private settle() {
     if (this.settleTimer) clearTimeout(this.settleTimer)
     this.settleTimer = setTimeout(() => {
-      this.interacting = !!this.action || !!this.gesture || !!this.momentum
+      this.interacting = !!this.action || !!this.gesture || !!this.momentum || !!this.turnAnim
       this.requestBase()
       this.emitView()
       if (this.selection) this.emitSelection()
@@ -1178,9 +1345,11 @@ export class Editor {
   }
 
   private visiblePages(): LayoutPage[] {
+    const left = this.camX / this.zoom
+    const right = (this.camX + this.width) / this.zoom
     const top = this.camY / this.zoom
     const bottom = (this.camY + this.height) / this.zoom
-    return this.pages.filter((lp) => lp.y + lp.page.height >= top && lp.y <= bottom)
+    return this.pages.filter((lp) => lp.x + lp.page.width >= left && lp.x <= right && lp.y + lp.page.height >= top && lp.y <= bottom)
   }
 
   private renderBase() {
@@ -1193,7 +1362,7 @@ export class Editor {
     const desired = this.zoom * this.dpr
     for (const lp of visible) {
       const { page } = lp
-      const sx = -this.camX * this.dpr
+      const sx = (lp.x * this.zoom - this.camX) * this.dpr
       const sy = (lp.y * this.zoom - this.camY) * this.dpr
       const w = page.width * desired
       const h = page.height * desired
@@ -1218,9 +1387,9 @@ export class Editor {
         ctx.clip()
         ctx.setTransform(desired, 0, 0, desired, sx, sy)
         const view: Rect = {
-          minX: this.camX / this.zoom,
+          minX: this.camX / this.zoom - lp.x,
           minY: this.camY / this.zoom - lp.y,
-          maxX: (this.camX + this.width) / this.zoom,
+          maxX: (this.camX + this.width) / this.zoom - lp.x,
           maxY: (this.camY + this.height) / this.zoom - lp.y,
         }
         const strokes = (this.strokes.get(page.id) ?? []).filter((s) => !this.hidden.has(s.id) && rectsIntersect(view, pointsBounds(s.points, s.size)))
@@ -1317,7 +1486,7 @@ export class Editor {
 
   private pageTransform(ctx: CanvasRenderingContext2D, lp: LayoutPage, clip: boolean) {
     const s = this.zoom * this.dpr
-    const ox = -this.camX * this.dpr
+    const ox = (lp.x * this.zoom - this.camX) * this.dpr
     const oy = (lp.y * this.zoom - this.camY) * this.dpr
     ctx.setTransform(s, 0, 0, s, ox, oy)
     if (clip) {

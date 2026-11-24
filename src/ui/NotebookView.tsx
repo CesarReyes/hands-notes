@@ -155,6 +155,12 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
       } else if (mod && e.key.toLowerCase() === 'y') {
         e.preventDefault()
         editorRef.current?.redo()
+      } else if (e.key === 'ArrowRight' || e.key === 'PageDown') {
+        e.preventDefault()
+        editorRef.current?.nextPage()
+      } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') {
+        e.preventDefault()
+        editorRef.current?.prevPage()
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         editorRef.current?.deleteSelection()
       } else if (!mod) {
@@ -181,7 +187,7 @@ export function NotebookView({ notebookId, onBack }: { notebookId: string; onBac
     if (!currentPage) return
     await addPage(notebookId, currentPage.id, currentPage.template, currentPage.paper)
     // Wait for the live query to deliver the new layout, then scroll to it.
-    setTimeout(() => editorRef.current?.scrollToPage(view.pageIndex + 1), 120)
+    setTimeout(() => editorRef.current?.scrollToPage(view.pageIndex + 1, true), 120)
   }
 
   const insertImage = useCallback(
